@@ -231,6 +231,14 @@ def _extract_placeholders(pdf, template_name=None):
                     print(f"  '{word_data['text']}' at y: {word_data['top']}")
             print("---")
             
+            # Find the y-coordinate of "Sworn to and subscribed" if it exists
+            sworn_y = None
+            for word_data in words:
+                if "sworn to and subscribed" in word_data['text'].lower():
+                    sworn_y = word_data['top']
+                    print(f"📍 Found 'Sworn to and subscribed' at y: {sworn_y}")
+                    break
+            
             for word_data in words:
                 word_text = word_data['text'].strip()
                 
@@ -255,6 +263,12 @@ def _extract_placeholders(pdf, template_name=None):
                 # Use length > 20 to avoid catching date underscores (which are shorter)
                 if len(word_text) > 20 and all(c in '_' for c in word_text):
                     print(f"🔍 Found underscore line: '{word_text}' at y: {word_data['top']}")
+                    
+                    # Skip if this field is after "Sworn to and subscribed"
+                    if sworn_y is not None and word_data['top'] > sworn_y:
+                        print(f"⏭️ Skipping signature after 'Sworn to and subscribed': '{word_text}' at y: {word_data['top']}")
+                        continue
+                    
                     should_add = False
                     
                     if template_name == "Georgia Template":
@@ -299,6 +313,11 @@ def _extract_placeholders(pdf, template_name=None):
                 if '___' in word_text and len([c for c in word_text if c == '_']) >= 3:
                     print(f"🔍 CHECKING underscore '{word_text}' at y: {word_data['top']}")
                     
+                    # Skip if this field is after "Sworn to and subscribed"
+                    if sworn_y is not None and word_data['top'] > sworn_y:
+                        print(f"⏭️ Skipping field after 'Sworn to and subscribed': '{word_text}' at y: {word_data['top']}")
+                        continue
+                    
                     # Quick check: skip signature underscores (long lines near signature words)
                     nearby_words = []
                     for other_word in words:
@@ -314,7 +333,13 @@ def _extract_placeholders(pdf, template_name=None):
                         any(sig_word in nearby_text for sig_word in ['signature', 'agent', 'landlord', 'shivaani'])):
                         print(f"⏭️ Skipped signature underscore at y: {word_data['top']}")
                     else:
-                        # Add as date underscore
+                        # Check if this is a year field (starts with "20")
+                        if word_text.startswith('20'):
+                            placeholder_type = 'year_blank'
+                        else:
+                            placeholder_type = 'underscore_blank'
+                            
+                        # Add as appropriate underscore type
                         signature_locations.append({
                             'page': page_num,
                             'text': word_text,
@@ -323,7 +348,7 @@ def _extract_placeholders(pdf, template_name=None):
                             'width': word_data['x1'] - word_data['x0'],
                             'height': word_data['bottom'] - word_data['top'],
                             'font_size': word_data.get('size', 12),
-                            'placeholder_type': 'underscore_blank'
+                            'placeholder_type': placeholder_type
                         })
                         print(f"✅ Found DATE underscore at y: {word_data['top']}")
 
@@ -477,6 +502,8 @@ def _extract_placeholders(pdf, template_name=None):
     
     # Post-process underscore_blank placeholders to assign them to day, month, year, signature based on template
     underscore_blanks = [loc for loc in signature_locations if loc.get('placeholder_type') == 'underscore_blank']
+    print(f"🔍 DEBUG: Found {len(underscore_blanks)} underscore_blank items")
+    print(f"🔍 DEBUG: template_name = '{template_name}'")
     if underscore_blanks:
         # Sort by Y position (top to bottom) to determine order
         underscore_blanks.sort(key=lambda x: x['y'])
@@ -511,7 +538,7 @@ def _extract_placeholders(pdf, template_name=None):
                     assigned_type = 'month_blank'
                 elif ',' in text and len(text) > 10:  # Month fields often have commas: "__________________, "
                     assigned_type = 'month_blank'
-                elif text.startswith('20'):  # "20____"
+                elif text.startswith('20') or '20' in text:  # "20____" or any text containing "20"
                     assigned_type = 'year_blank'
                 elif len(text) > 25:  # Very long underscore = signature (raised threshold)
                     assigned_type = 'signature'
@@ -520,11 +547,39 @@ def _extract_placeholders(pdf, template_name=None):
                     remaining_pattern = ['day_blank', 'month_blank', 'year_blank']
                     assigned_type = remaining_pattern[i % 3]
             elif template_name and 'alabama' in template_name.lower():
-                # Alabama: first 5 follow pattern, rest are blank
-                if i < len(type_pattern):
-                    assigned_type = type_pattern[i]
+                # Alabama: Smart assignment based on nearby text context
+                text = blank['text'].lower()
+                
+                # Check nearby text to determine what this underscore should be
+                nearby_words = []
+                for other_word in words:
+                    if (abs(other_word['top'] - blank['y']) < 30 and  # Same line area
+                        abs(other_word['x0'] - blank['x']) < 200):     # Nearby
+                        nearby_words.append(other_word['text'].lower())
+                
+                nearby_text = ' '.join(nearby_words)
+                print(f"🔍 Alabama underscore '{text}' nearby: '{nearby_text}'")
+                
+                # Alabama-specific content detection:
+                # First check if this is after "Sworn to and subscribed" - if so, leave blank
+                if 'sworn to and subscribed' in nearby_text:
+                    print(f"⏭️ Alabama: Found 'sworn to and subscribed' → leaving blank")
+                    continue
+                elif 'by:' in nearby_text:  # "By:" indicates signature
+                    assigned_type = 'signature'
+                    print(f"✅ Alabama: Found 'By:' → signature")
+                elif 'this the' in nearby_text:  # "this the ____" = day
+                    assigned_type = 'day_blank'
+                    print(f"✅ Alabama: Found 'this the' → day")
+                elif 'day of' in nearby_text:  # "day of ____" = month
+                    assigned_type = 'month_blank'
+                    print(f"✅ Alabama: Found 'day of' → month")
+                elif text.startswith('20') or '20' in nearby_text:  # "20____" = year (last 2 digits)
+                    assigned_type = 'year_blank'
+                    print(f"✅ Alabama: Found '20' → year (last 2 digits)")
                 else:
-                    print(f"⏭️ Alabama: Skipping extra underscore #{i+1} (leaving blank)")
+                    # For remaining underscores, leave blank (skip)
+                    print(f"⏭️ Alabama: Leaving underscore #{i+1} blank (no matching pattern)")
                     continue
             else:
                 # Georgia: first 3 follow pattern, rest are blank
@@ -741,15 +796,32 @@ def determine_date_field_type(page, x, y, word_text):
         context = ' '.join(nearby_words)
         
         # Look for specific patterns
-        if 'day of' in context:
-            return 'day'
-        elif 'month' in context or any(month in context for month in ['january', 'february', 'march', 'april', 'may', 'june', 'july', 'august', 'september', 'october', 'november', 'december']):
-            return 'month'
-        elif '20' in context or 'year' in context:
+        if '20' in context or 'year' in context:
             return 'year'
-        else:
-            # Default based on position or pattern
-            return 'day'  # Default to day if context is unclear
+        
+        # Check for "day of [month]" pattern
+        for i, word in enumerate(nearby_words):
+            if word == 'of' and i > 0 and i < len(nearby_words) - 1:
+                prev_word = nearby_words[i-1].lower()
+                next_word = nearby_words[i+1].lower()
+                
+                # If we see "day of [month]", the field before "of" is day, after is month
+                if 'day' in prev_word and next_word in ['january', 'february', 'march', 'april', 'may', 'june', 'july', 'august', 'september', 'october', 'november', 'december']:
+                    # Check if this field is before or after "of"
+                    words_before_field = []
+                    for w in words:
+                        if w['x0'] < x:
+                            words_before_field.append(w['text'].lower())
+                    
+                    # If "of" is in words before this field, this is a month field
+                    # Otherwise, it's a day field
+                    if 'of' in words_before_field:
+                        return 'month'
+                    else:
+                        return 'day'
+        
+        # Default to day if no specific pattern is found
+        return 'day'
             
     except Exception:
         return 'day'  # Default to day if analysis fails
@@ -780,8 +852,12 @@ def calculate_text_position(x, y, text_to_insert, font_size, placeholder_type):
         # For day fields, position slightly to the left (less right offset)
         x_offset = 10  # Reduced from 15 to 10 for day fields
         y_offset = 8  # Position down a little more
-    elif placeholder_type in ['month_blank', 'year_blank', 'date_blank']:
-        # For month and year fields, keep the current positioning
+    elif placeholder_type == 'year_blank':
+        # For year fields, position more carefully to avoid overlaps
+        x_offset = 5  # Reduced offset to prevent overlap with following text
+        y_offset = 8  # Position down a little more
+    elif placeholder_type in ['month_blank', 'date_blank']:
+        # For month fields, keep the current positioning
         x_offset = 15  # Move to the right to align with other text
         y_offset = 8  # Position down a little more
     elif placeholder_type == 'signature':
@@ -905,18 +981,76 @@ def create_signed_pdf_simple(pdf_path_or_bytes, signature_name, signature_locati
                         print(f"📋 No signatures to copy to page {page_num + 1}")
 
             if page_signatures:
+                # Find the y-coordinate of "Sworn to and subscribed" if it exists
+                sworn_y = None
+                # Get all text with its position
+                page_dict = page.get_text("dict")
+                
+                # Print all text blocks for debugging
+                print("\n🔍 Text blocks on page:")
+                for block in page_dict["blocks"]:
+                    for line in block.get("lines", []):
+                        for span in line.get("spans", []):
+                            text = span.get("text", "").strip()
+                            if text:
+                                y = span["origin"][1]
+                                print(f"  '{text}' at y: {y}")
+                                if "sworn to and subscribed" in text.lower():
+                                    sworn_y = y
+                                    print(f"📍 Found 'Sworn to and subscribed' at y: {sworn_y}")
+                                    # Also store the text for context
+                                    sworn_text = text
+                                    break
+                
+                if sworn_y is not None:
+                    # Find the date fields that appear in the sworn text
+                    sworn_date_fields = []
+                    for sig_loc in page_signatures:
+                        if sig_loc['placeholder_type'] in ['date_blank', 'day_blank', 'month_blank', 'year_blank', 'underscore_blank']:
+                            # Check if this field is near the sworn text
+                            if abs(sig_loc['y'] - sworn_y) < 30:  # Within 30 points
+                                sworn_date_fields.append(sig_loc)
+                                print(f"📅 Found date field in sworn text: {sig_loc['text']} at y: {sig_loc['y']}")
+                    
+                    # Remove these fields from page_signatures
+                    for field in sworn_date_fields:
+                        if field in page_signatures:
+                            page_signatures.remove(field)
+                            print(f"🗑️ Removed date field from processing: {field['text']}")
+                    
+                    # Adjust y-coordinate to match our coordinate system
+                    sworn_y = sworn_y - 30  # Adjusted offset to catch all fields after the text
+                    print(f"📍 Adjusted sworn_y coordinate to: {sworn_y}")
+                
                 # Add signatures directly using PyMuPDF text insertion
                 for sig_loc in page_signatures:
                     x = sig_loc['x']
                     y = sig_loc['y']  # Keep original coordinate system
+                    
                     font_size = sig_loc.get('font_size', 12)
                     placeholder_type = sig_loc.get('placeholder_type', 'signature')
+                    
+                    # Skip if this field is after "Sworn to and subscribed"
+                    if sworn_y is not None:
+                        print(f"🔍 Comparing field y: {y} with sworn_y: {sworn_y}")
+                        if y >= sworn_y - 10:  # Include a small buffer to catch fields right at the sworn text
+                            print(f"⏭️ Skipping field at or after 'Sworn to and subscribed' at y: {y}")
+                            continue
+                        else:
+                            print(f"✅ Including field before 'Sworn to and subscribed' at y: {y}")
+                            
+                    # Additional check for date fields
+                    if placeholder_type in ['date_blank', 'day_blank', 'month_blank', 'year_blank', 'underscore_blank']:
+                        # Check if this is part of the sworn text
+                        if sworn_y is not None and abs(y - sworn_y) < 30:
+                            print(f"⏭️ Skipping date field in sworn text section at y: {y}")
+                            continue
                     
                     # Insert text directly into the PDF
                     if placeholder_type == 'date':
                         # Handle different date field types
                         if sig_loc['text'] == 'Day':
-                            text_to_insert = day_text
+                            text_to_insert = f"{day}{get_ordinal_suffix(day)}"  # Use proper ordinal suffix
                         elif sig_loc['text'] == 'Month':
                             text_to_insert = month_text
                         elif sig_loc['text'] == '--':
@@ -926,8 +1060,8 @@ def create_signed_pdf_simple(pdf_path_or_bytes, signature_name, signature_locati
                         
                         # Insert date text with better positioning and alignment
                         point = calculate_text_position(x, y, text_to_insert, font_size, placeholder_type)
-                        # Use smaller font size for date fields
-                        date_font_size = max(font_size - 3, 8)  # Reduce by 3 but minimum 8
+                        # Use slightly smaller font size for date fields
+                        date_font_size = font_size - 2  # Decrease by 2 points
                         page.insert_text(
                             point,
                             text_to_insert,
@@ -938,13 +1072,13 @@ def create_signed_pdf_simple(pdf_path_or_bytes, signature_name, signature_locati
                         )
                     elif placeholder_type == 'day_blank':
                         # Handle day blanks - use day with suffix like "6th"
-                        text_to_insert = day_text  # Use day_text which includes "th" suffix
+                        text_to_insert = f"{day}{get_ordinal_suffix(day)}"  # Use proper ordinal suffix
                         print(f"🗓️ Inserting day: {text_to_insert}")
                         
                         # Insert date text with better positioning and alignment
                         point = calculate_text_position(x, y, text_to_insert, font_size, placeholder_type)
-                        # Use smaller font size for date fields
-                        date_font_size = max(font_size - 3, 8)  # Reduce by 3 but minimum 8
+                        # Use slightly smaller font size for date fields
+                        date_font_size = font_size - 2  # Decrease by 2 points
                         page.insert_text(
                             point,
                             text_to_insert,
@@ -960,8 +1094,8 @@ def create_signed_pdf_simple(pdf_path_or_bytes, signature_name, signature_locati
                         
                         # Insert date text with better positioning and alignment
                         point = calculate_text_position(x, y, text_to_insert, font_size, placeholder_type)
-                        # Use smaller font size for date fields
-                        date_font_size = max(font_size - 3, 8)  # Reduce by 3 but minimum 8
+                        # Use slightly smaller font size for date fields
+                        date_font_size = font_size - 2  # Decrease by 2 points
                         page.insert_text(
                             point,
                             text_to_insert,
@@ -971,14 +1105,20 @@ def create_signed_pdf_simple(pdf_path_or_bytes, signature_name, signature_locati
                             render_mode=0
                         )
                     elif placeholder_type == 'year_blank':
-                        # Handle Florida template year blanks (20______. pattern) - use last 2 digits only
+                        # For year blanks that start with "20", only insert the last 2 digits
                         text_to_insert = year_text  # This is already the last 2 digits (like "25")
                         print(f"🗓️ Inserting year: {text_to_insert}")
                         
-                        # Insert date text with better positioning and alignment
-                        point = calculate_text_position(x, y, text_to_insert, font_size, placeholder_type)
-                        # Use smaller font size for date fields
-                        date_font_size = max(font_size - 3, 8)  # Reduce by 3 but minimum 8
+                        # Calculate position - move right to align after "20"
+                        x_offset = 5  # Reduced offset for year fields
+                        if sig_loc['text'].startswith('20'):
+                            # If the field starts with "20", adjust position to after it
+                            x_offset = 15  # Reduced offset to prevent overlap with following text
+                        
+                        point = fitz.Point(x + x_offset, y + 8)  # +8 for vertical alignment
+                        
+                        # Use slightly smaller font size for date fields
+                        date_font_size = font_size - 2  # Decrease by 2 points
                         page.insert_text(
                             point,
                             text_to_insert,
@@ -1002,8 +1142,8 @@ def create_signed_pdf_simple(pdf_path_or_bytes, signature_name, signature_locati
                         
                         # Insert date text with better positioning and alignment
                         point = calculate_text_position(x, y, text_to_insert, font_size, placeholder_type)
-                        # Use smaller font size for date fields
-                        date_font_size = max(font_size - 3, 8)  # Reduce by 3 but minimum 8
+                        # Use slightly smaller font size for date fields
+                        date_font_size = font_size - 2  # Decrease by 2 points
                         page.insert_text(
                             point,
                             text_to_insert,

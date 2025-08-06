@@ -557,6 +557,10 @@ def _extract_placeholders(pdf, template_name=None):
 
 def extract_property_and_unit_info(pdf_path_or_bytes, template_name):
     """Extract property name and unit number from PDF for file naming"""
+    return extract_property_and_unit_info_from_page(pdf_path_or_bytes, template_name, 0)
+
+def extract_property_and_unit_info_from_page(pdf_path_or_bytes, template_name, page_number=0):
+    """Extract property name and unit number from a specific page of PDF for file naming"""
     try:
         # Handle both file paths and bytes
         if isinstance(pdf_path_or_bytes, io.BytesIO):
@@ -575,7 +579,11 @@ def extract_property_and_unit_info(pdf_path_or_bytes, template_name):
         file_buffer.seek(0)
         
         with pdfplumber.open(file_buffer) as pdf:
-            page = pdf.pages[0]
+            # Use the specified page number, default to page 0 if out of range
+            if page_number >= len(pdf.pages):
+                page_number = 0
+            
+            page = pdf.pages[page_number]
             words = page.extract_words()
             
             property_name = "Unknown Property"
@@ -628,11 +636,11 @@ def extract_property_and_unit_info(pdf_path_or_bytes, template_name):
                         # Only use if we haven't found an "Apt #" pattern yet
                         unit_number = word_text
             
-            print(f"🏢 Extracted: Property='{property_name}', Unit='{unit_number}'")
+            print(f"🏢 Extracted from page {page_number + 1}: Property='{property_name}', Unit='{unit_number}'")
             return property_name, unit_number
             
     except Exception as e:
-        print(f"⚠️ Error extracting property/unit info: {e}")
+        print(f"⚠️ Error extracting property/unit info from page {page_number + 1}: {e}")
         return "Unknown Property", "0000"
 
 def create_handwritten_signature(name):
@@ -1273,7 +1281,7 @@ def main():
                             if matched_template and match_score > 20:  # Minimum confidence threshold
                                 st.success(f"Matched to {matched_template} (confidence: {match_score})")
                                 
-                                # Extract property name and unit number for file naming
+                                # Extract property name and unit number for file naming from the UPLOADED PDF
                                 property_name, unit_number = extract_property_and_unit_info(pdf_bytes, matched_template)
                                 
                                 # Get template info and find placeholders
@@ -1284,31 +1292,6 @@ def main():
                                 signature_locations = find_signature_placeholders_simple(template_path, matched_template)
                                 
                                 if signature_locations:
-                                    st.write(f"Found {len(signature_locations)} signature location(s) in template")
-                                    
-                                    # Show parentheses detection details
-                                    parentheses_found = [loc for loc in signature_locations if loc.get('placeholder_type') in ['checkbox', 'existing_checkbox']]
-                                    if parentheses_found:
-                                        st.write(f"Found {len(parentheses_found)} parentheses checkbox(es):")
-                                        for cb in parentheses_found:
-                                            if cb.get('placeholder_type') == 'existing_checkbox':
-                                                st.write(f"  - Parentheses: {cb.get('checkbox_type', 'unknown')} (near: {cb.get('nearby_text', 'N/A')})")
-                                            else:
-                                                st.write(f"  - Service method parentheses: {cb.get('service_method', 'N/A')}")
-                                        
-                                        # Debug: Show what service method was selected
-                                        st.write(f"🔍 Selected service method: {service_method}")
-                                    else:
-                                        st.write("No parentheses checkboxes found in template")
-                                        st.warning("⚠️ No parentheses detected. This might be because:")
-                                        st.write("  - Parentheses are not in the expected format ( )")
-                                        st.write("  - Service method text is not nearby")
-                                        st.write("  - PDF structure is different than expected")
-                                        
-                                        # Debug: Show all detected text to help troubleshoot
-                                        st.write("🔍 Debug: All detected text on this page:")
-                                        for loc in signature_locations:
-                                            st.write(f"  - {loc.get('text', 'N/A')} (type: {loc.get('placeholder_type', 'N/A')})")
                                     
                                     # Add signatures at the found locations using the uploaded PDF
                                     processed_pages = create_signed_pdf_simple(
@@ -1326,7 +1309,16 @@ def main():
                                         
                                         # Add each individual page as a separate file
                                         for page_info in processed_pages:
-                                            formatted_filename = f"{property_name}{unit_number} Demand Letter {current_date}.pdf"
+                                            # Extract unit number for each individual page if it's a multi-page PDF
+                                            if len(processed_pages) > 1:
+                                                # For multi-page PDFs, extract unit number from each page separately
+                                                page_property_name, page_unit_number = extract_property_and_unit_info_from_page(pdf_bytes, matched_template, page_info['page_num'] - 1)
+                                            else:
+                                                # For single page PDFs, use the already extracted info
+                                                page_property_name = property_name
+                                                page_unit_number = unit_number
+                                            
+                                            formatted_filename = f"{page_property_name}{page_unit_number} Demand Letter {current_date}.pdf"
                                             processed_files.append({
                                                 'name': formatted_filename,
                                                 'data': page_info['data'],
@@ -1334,72 +1326,67 @@ def main():
                                                 'matched_template': matched_template,
                                                 'match_score': match_score,
                                                 'page_num': page_info['page_num'],
-                                                'property_name': property_name,
-                                                'unit_number': unit_number
+                                                'property_name': page_property_name,
+                                                'unit_number': page_unit_number
                                             })
                                 else:
-                                    st.warning(f"No signature placeholders found in {matched_template}")
+                                    st.error(f"No signature placeholders found in {matched_template}")
                             else:
-                                st.warning(f"Could not confidently match {uploaded_file.name} to any template (best score: {match_score})")
-                                
-                                # Show analysis details for debugging
-                                with st.expander("Analysis Details"):
-                                    st.write(f"Page count: {uploaded_features['page_count']}")
-                                    st.write(f"Word count: {uploaded_features['word_count']}")
-                                    st.write(f"State indicators: {uploaded_features['state_indicators']}")
-                                    st.write(f"Has demand letter keywords: {uploaded_features['has_demand_letter_keywords']}")
-                                    st.write(f"Key phrases found: {uploaded_features['key_phrases'][:5]}")  # Show first 5
+                                st.error(f"Could not match {uploaded_file.name} to any template")
                     
                     # Display results
                     if processed_files:
                         st.success(f"Successfully processed {len(processed_files)} file(s)")
                         
-                        # Create zip file for batch download
-                        if len(processed_files) > 1:
-                            with tempfile.NamedTemporaryFile(delete=False, suffix='.zip') as tmp_zip:
-                                with zipfile.ZipFile(tmp_zip.name, 'w') as zip_file:
-                                    for file_info in processed_files:
-                                        zip_file.writestr(file_info['name'], file_info['data'])
-                                
-                                # Read the zip file
-                                with open(tmp_zip.name, 'rb') as f:
-                                    zip_bytes = f.read()
-                                
-                                # Clean up
-                                os.unlink(tmp_zip.name)
+                        # Create zip file for batch download - always available
+                        with tempfile.NamedTemporaryFile(delete=False, suffix='.zip') as tmp_zip:
+                            with zipfile.ZipFile(tmp_zip.name, 'w') as zip_file:
+                                for file_info in processed_files:
+                                    zip_file.writestr(file_info['name'], file_info['data'])
                             
-                            # Download button for zip file
-                            current_date_zip = datetime.now().strftime('%m-%d-%Y')
+                            # Read the zip file
+                            with open(tmp_zip.name, 'rb') as f:
+                                zip_bytes = f.read()
+                            
+                            # Clean up
+                            os.unlink(tmp_zip.name)
+                        
+                        # Prominent ZIP download button
+                        current_date_zip = datetime.now().strftime('%m-%d-%Y')
+                        st.subheader("Download Options")
+                        
+                        # Make ZIP download prominent
+                        col_zip, col_info = st.columns([3, 1])
+                        with col_zip:
                             st.download_button(
-                                label="Download All Signed Demand Letters (ZIP)",
+                                label="Download All Files as ZIP",
                                 data=zip_bytes,
                                 file_name=f"Demand Letters {current_date_zip}.zip",
-                                mime="application/zip"
+                                mime="application/zip",
+                                type="primary",
+                                use_container_width=True,
+                                key="download_zip_all"
                             )
+                        with col_info:
+                            st.info(f"{len(processed_files)} file(s)")
+                        
+                        st.markdown("---")
+                        st.markdown("**Individual Downloads:**")
                         
                         # Individual download buttons
                         with col2:
                             st.header("Results")
                             
-                            for file_info in processed_files:
+                            for i, file_info in enumerate(processed_files):
                                 st.write(f"**{file_info['name']}**")
-                                st.write(f"Signature locations: {file_info['locations_found']}")
                                 
-                                # Show page number if available
-                                if 'page_num' in file_info:
-                                    st.write(f"Page: {file_info['page_num']}")
-                                
-                                # Show template matching info if available
-                                if 'matched_template' in file_info:
-                                    st.write(f"Matched template: {file_info['matched_template']}")
-                                    st.write(f"Match confidence: {file_info['match_score']}")
-                                
-                                # Create download button
+                                # Create download button with unique key
                                 st.download_button(
                                     label=f"Download {file_info['name']}",
                                     data=file_info['data'],
                                     file_name=file_info['name'],
-                                    mime="application/pdf"
+                                    mime="application/pdf",
+                                    key=f"download_individual_{i}"
                                 )
                                 st.divider()
                     else:
@@ -1416,28 +1403,8 @@ def main():
         5. **Click Add Signatures** to process PDFs
         6. **Download** signed PDFs (split into individual pages)
         
-        The system will:
-        - **Analyze uploaded PDFs** and match to appropriate templates
-        - **Find signature placeholders** in templates
-        - **Add signatures** in correct locations
-        - **Add dates** where appropriate
-        - **Check appropriate service method** checkbox
-        - **Split multi-page PDFs into individual pages**
-        - **Preserve PDF formatting**
-        - **Show matching confidence** for each file
         """)
-        
-        st.header("Supported Placeholders")
-        st.markdown("""
-        - `SIGN HERE`
-        - `SIGNATURE`
-        - `<<SIGNATURE>>`
-        - `<<SIGN>>`
-        - `DATE HERE`
-        - `<<DATE>>`
-        - `___` (underscore lines)
-        - `...` (dotted lines)
-        """)
+    
 
 if __name__ == "__main__":
     main() 

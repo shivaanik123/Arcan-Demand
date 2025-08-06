@@ -1,13 +1,8 @@
 [build]
-builder = "NIXPACKS"
-buildCommand = """
-apt-get update && apt-get install -y python3-pip
-python3 -m pip install --upgrade pip
-pip install -r requirements.txt
-"""
+builder = "DOCKERFILE"
+dockerfilePath = "Dockerfile"
 
 [deploy]
-startCommand = "streamlit run streamlit_app.py --server.address 0.0.0.0 --server.port $PORT"
 healthcheckPath = "/"
 healthcheckTimeout = 100
 restartPolicyType = "ON_FAILURE"

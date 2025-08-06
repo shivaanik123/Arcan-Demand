@@ -178,8 +178,8 @@ def match_pdf_to_template(uploaded_pdf_features):
         st.error(f"Error matching PDF to template: {str(e)}")
         return None, 0
 
-def find_signature_placeholders_simple(pdf_path_or_bytes):
-    """Find signature placeholders with simple, robust approach"""
+def find_signature_placeholders_simple(pdf_path_or_bytes, template_name=None):
+    """Find signature placeholders with simple, robust approach and template-specific positioning"""
     try:
         # Handle both file paths and bytes
         if isinstance(pdf_path_or_bytes, io.BytesIO):
@@ -195,13 +195,14 @@ def find_signature_placeholders_simple(pdf_path_or_bytes):
         file_buffer = io.BytesIO(pdf_bytes)
         file_buffer.seek(0)  # 🔑 this is crucial
         with pdfplumber.open(file_buffer) as pdf:
-            return _extract_placeholders(pdf)
+            return _extract_placeholders(pdf, template_name)
     except Exception as e:
         st.error(f"Error finding placeholders: {str(e)}")
         return []
 
-def _extract_placeholders(pdf):
-    """Extract placeholders from PDF object"""
+def _extract_placeholders(pdf, template_name=None):
+    """Extract placeholders from PDF object with template-specific positioning"""
+    print(f"🔍 Template detection: Processing with template_name='{template_name}'")
     signature_locations = []
     
     for page_num, page in enumerate(pdf.pages):
@@ -209,6 +210,13 @@ def _extract_placeholders(pdf):
         detected_parentheses = set()
         try:
             words = page.extract_words()
+            
+            # Debug: Print all words to understand page structure
+            print(f"📄 Page {page_num + 1} - All words with y-coordinates:")
+            for word_data in words:
+                if len(word_data['text'].strip()) > 0:  # Only show non-empty words
+                    print(f"  '{word_data['text']}' at y: {word_data['top']}")
+            print("---")
             
             for word_data in words:
                 word_text = word_data['text'].strip()
@@ -230,10 +238,28 @@ def _extract_placeholders(pdf):
                             'placeholder_type': 'signature'
                         })
                 
-                # Check for long underscore lines (signature lines) - only bottom ones
-                if len(word_text) > 15 and all(c in '_' for c in word_text):
-                    # Only add signature lines that are in the bottom section (y > 500)
-                    if word_data['top'] > 500:
+                # Check for long underscore lines (signature lines) - template-specific positioning
+                if len(word_text) > 10 and all(c in '_' for c in word_text):
+                    print(f"🔍 Found underscore line: '{word_text}' at y: {word_data['top']}")
+                    should_add = False
+                    
+                    if template_name == "Georgia Template":
+                        # Georgia Template: Add signatures for both underscore lines
+                        # Based on debug: first at y: 480.3, second at y: 675.8
+                        if word_data['top'] < 500 or word_data['top'] > 600:  # Include first (480.3) and second (675.8)
+                            should_add = True
+                            print(f"✅ Georgia Template: Adding signature at y: {word_data['top']}")
+                        else:
+                            print(f"⏭️ Georgia Template: Skipping underscore at y: {word_data['top']} (not in target range)")
+                    else:
+                        # Florida Template: Only add signature lines that are in the bottom section (y > 500)
+                        if word_data['top'] > 500:
+                            should_add = True
+                            print(f"✅ Florida Template: Adding signature at y: {word_data['top']}")
+                        else:
+                            print(f"⏭️ Florida Template: Skipping underscore at y: {word_data['top']} (not in target range)")
+                    
+                    if should_add:
                         signature_locations.append({
                             'page': page_num,
                             'text': word_text,
@@ -318,9 +344,24 @@ def _extract_placeholders(pdf):
                     })
                 
                 # ENHANCED PARENTHESES DETECTION - Focus on "Proof of Service" pattern
-                # Look for parentheses: ( ), (), (, ), (.) .
-                # ENHANCED PARENTHESES DETECTION - Only detect complete patterns, not individual characters
-                if word_text.strip() in ['( )', '()', '(.)']:
+                # Handle both complete patterns and individual opening parentheses
+                if word_text.strip() in ['( )', '()', '(.)', '(']:
+                    # For individual '(', also check if there's a matching ')' on the same line
+                    is_valid_checkbox = True
+                    if word_text.strip() == '(':
+                        # Look for matching ')' on the same line
+                        has_matching_paren = False
+                        for other_word in words:
+                            if (other_word['text'].strip() == ')' and
+                                abs(other_word['top'] - word_data['top']) < 10 and  # Same line
+                                other_word['x0'] > word_data['x0']):  # To the right
+                                has_matching_paren = True
+                                break
+                        is_valid_checkbox = has_matching_paren
+                    
+                    if not is_valid_checkbox:
+                        continue
+                        
                     # Check if we've already detected this parentheses (avoid duplicates)
                     parentheses_key = f"{word_data['x0']}_{word_data['top']}"
                     if parentheses_key in detected_parentheses:
@@ -333,28 +374,20 @@ def _extract_placeholders(pdf):
                     nearby_text = ""
                     service_type = "unknown"
                     
-                    # Search for service method text in nearby words (expanded search)
+                    # Search for service method text ONLY to the right of the parenthesis (very focused)
                     for other_word in words:
-                        if (abs(other_word['top'] - word_data['top']) < 100 and  # Same line or close
-                            abs(other_word['x0'] - word_data['x0']) < 800):  # Within reasonable distance
+                        if (abs(other_word['top'] - word_data['top']) < 10 and  # Same line
+                            other_word['x0'] > word_data['x0'] and  # Only words to the right
+                            other_word['x0'] - word_data['x0'] < 200):  # Within 200px to the right
                             nearby_text += other_word['text'] + " "
                     
-                    # Check for service method patterns (more comprehensive)
+                    # Check for service method patterns (very specific - only look at immediate text)
                     nearby_lower = nearby_text.lower()
                     
-                    # Check for exact patterns from the image
-                    if any(phrase in nearby_lower for phrase in [
-                        'personally delivering same upon said tenant',
-                        'personally delivering',
-                        'personally delivered'
-                    ]):
+                    # Check for exact patterns - look at the first few words after the parenthesis
+                    if 'by personally delivering' in nearby_lower:
                         service_type = "personally_delivering"
-                    elif any(phrase in nearby_lower for phrase in [
-                        'posting same at the above described premises',
-                        'posting same at the above described',
-                        'posting same at',
-                        'posting'
-                    ]):
+                    elif 'by posting' in nearby_lower:
                         service_type = "posting"
                     
                     print(f"🔍 Service type for '{word_text}': {service_type} (nearby: '{nearby_text.strip()}')")
@@ -441,6 +474,19 @@ def _extract_placeholders(pdf):
         except Exception as e:
             st.warning(f"Error processing page {page_num}: {str(e)}")
             continue
+    
+    # Debug: Show final signature locations summary
+    print(f"\n📊 FINAL SUMMARY: Found {len(signature_locations)} signature locations:")
+    checkbox_count = 0
+    for i, loc in enumerate(signature_locations):
+        loc_type = loc['placeholder_type']
+        if loc_type == 'existing_checkbox':
+            checkbox_count += 1
+            print(f"  {i+1}. Type: {loc_type}, Y: {loc['y']}, Text: '{loc['text']}', Checkbox Type: {loc.get('checkbox_type', 'unknown')}")
+        else:
+            print(f"  {i+1}. Type: {loc_type}, Y: {loc['y']}, Text: '{loc['text']}'")
+    print(f"📋 Checkboxes found: {checkbox_count}")
+    print("---\n")
     
     return signature_locations
 
@@ -787,7 +833,9 @@ def create_signed_pdf_simple(pdf_path_or_bytes, signature_name, signature_locati
                         checkbox_type = sig_loc.get('checkbox_type', 'unknown')
                         should_check = False
                         
+                        nearby_text = sig_loc.get('nearby_text', '')
                         print(f"🔍 Processing parentheses: type={checkbox_type}, service_method='{service_method}'")
+                        print(f"🔍 Nearby text: '{nearby_text}'")
                         
                         if service_method:  # Only check if user has selected a service method
                             # Enhanced matching logic
@@ -797,18 +845,18 @@ def create_signed_pdf_simple(pdf_path_or_bytes, signature_name, signature_locati
                             # EXCLUSIVE matching - only check the one that matches the user's selection
                             if service_method == "By personally delivering same upon said tenant":
                                 # User selected personally delivering - ONLY check that one
-                                if ('personally delivering' in nearby_text and 'tenant' in nearby_text) or checkbox_type == 'personally_delivering':
+                                if checkbox_type == 'personally_delivering':
                                     should_check = True
-                                    print(f"✅ Matched personally_delivering parentheses")
+                                    print(f"✅ MATCHED: User selected personally delivering, checkbox type is {checkbox_type}")
                                 else:
-                                    print(f"⏭️ Skipping - this is not the personally delivering checkbox")
+                                    print(f"⏭️ SKIPPED: User selected personally delivering, but this checkbox type is {checkbox_type}")
                             elif service_method == "By posting same at the above described premises in the absence of said tenant":
                                 # User selected posting - ONLY check that one
-                                if ('posting' in nearby_text and 'premises' in nearby_text) or checkbox_type == 'posting':
+                                if checkbox_type == 'posting':
                                     should_check = True
-                                    print(f"✅ Matched posting parentheses")
+                                    print(f"✅ MATCHED: User selected posting, checkbox type is {checkbox_type}")
                                 else:
-                                    print(f"⏭️ Skipping - this is not the posting checkbox")
+                                    print(f"⏭️ SKIPPED: User selected posting, but this checkbox type is {checkbox_type}")
                             else:
                                 # For any other service method, be very strict about matching
                                 print(f"⚠️ Unknown service method: '{service_method}' - not checking any parentheses")
@@ -1077,8 +1125,8 @@ def main():
                                 template_info = TEMPLATES[matched_template]
                                 template_path = template_info['file_path']
                                 
-                                # Find signature placeholders in the template
-                                signature_locations = find_signature_placeholders_simple(template_path)
+                                # Find signature placeholders in the template with template-specific positioning
+                                signature_locations = find_signature_placeholders_simple(template_path, matched_template)
                                 
                                 if signature_locations:
                                     st.write(f"Found {len(signature_locations)} signature location(s) in template")

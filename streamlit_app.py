@@ -22,6 +22,12 @@ TEMPLATES = {
         "description": "Georgia demand letter template with signature fields",
         "placeholders": ["SIGN HERE", "<<SIGNATURE>>"],
         "include_date": False
+    },
+    "Alabama Template": {
+        "file_path": "templates/Alabama Template.pdf",
+        "description": "Alabama demand letter template with signature and service fields", 
+        "placeholders": ["SIGN HERE", "<<SIGNATURE>>", "SERVICE METHOD"],
+        "include_date": True
     }
 }
 
@@ -72,6 +78,7 @@ def _extract_pdf_features(pdf):
     # State-specific keywords
     florida_keywords = ['florida', 'fl', 'miami', 'orlando', 'tampa', 'jacksonville', 'fort lauderdale']
     georgia_keywords = ['georgia', 'ga', 'atlanta', 'savannah', 'augusta', 'columbus', 'macon']
+    alabama_keywords = ['alabama', 'al', 'birmingham', 'montgomery', 'mobile', 'huntsville', 'hoover', 'tuscaloosa']
     
     all_text = ""
     
@@ -98,6 +105,11 @@ def _extract_pdf_features(pdf):
                 for keyword in georgia_keywords:
                     if keyword in text.lower():
                         features['state_indicators'].append('georgia')
+                        break
+                
+                for keyword in alabama_keywords:
+                    if keyword in text.lower():
+                        features['state_indicators'].append('alabama')
                         break
                 
         except Exception as e:
@@ -251,6 +263,15 @@ def _extract_placeholders(pdf, template_name=None):
                             print(f"✅ Georgia Template: Adding signature at y: {word_data['top']}")
                         else:
                             print(f"⏭️ Georgia Template: Skipping underscore at y: {word_data['top']} (not in target range)")
+                    elif template_name == "Alabama Template":
+                        # Alabama Template: Only sign first TWO signature lines (where SIGN HERE would be)
+                        # Based on analysis: y: 513.079 (first), y: 610.213 (second) - skip y: 688.768 (third)
+                        if (500 <= word_data['top'] <= 520 or    # First signature around 513
+                            600 <= word_data['top'] <= 620):     # Second signature around 610
+                            should_add = True
+                            print(f"✅ Alabama Template: Adding signature at y: {word_data['top']}")
+                        else:
+                            print(f"⏭️ Alabama Template: Skipping underscore at y: {word_data['top']} (only signing first two lines)")
                     else:
                         # Florida Template: Only add signature lines that are in the bottom section (y > 500)
                         if word_data['top'] > 500:
@@ -295,7 +316,8 @@ def _extract_placeholders(pdf, template_name=None):
                         'font_size': word_data.get('size', 12),
                         'placeholder_type': 'month_blank'
                     })
-                elif '20______.' in word_text or '20____' in word_text:
+                elif ('20______.' in word_text or '20____' in word_text) and template_name != "Alabama Template":
+                    # Generic year pattern - but exclude Alabama Template (has specific handling)
                     signature_locations.append({
                         'page': page_num,
                         'text': word_text,
@@ -306,7 +328,48 @@ def _extract_placeholders(pdf, template_name=None):
                         'font_size': word_data.get('size', 12),
                         'placeholder_type': 'year_blank'
                     })
-                # Check for second section date patterns - in correct order: day, month, year
+                # Check for Alabama template specific date patterns
+                elif template_name == "Alabama Template":
+                    # Alabama date patterns based on analysis
+                    if word_text == '__________' and 560 <= word_data['top'] <= 565:
+                        # Day field at y: 561.646
+                        signature_locations.append({
+                            'page': page_num,
+                            'text': word_text,
+                            'x': word_data['x0'],
+                            'y': word_data['top'],
+                            'width': word_data['x1'] - word_data['x0'],
+                            'height': word_data['bottom'] - word_data['top'],
+                            'font_size': word_data.get('size', 14),  # Bigger font size
+                            'placeholder_type': 'day_blank'
+                        })
+                    elif word_text == '________________,' and 575 <= word_data['top'] <= 580:
+                        # Month field at y: 577.835
+                        signature_locations.append({
+                            'page': page_num,
+                            'text': word_text,
+                            'x': word_data['x0'],
+                            'y': word_data['top'],
+                            'width': word_data['x1'] - word_data['x0'],
+                            'height': word_data['bottom'] - word_data['top'],
+                            'font_size': word_data.get('size', 14),  # Bigger font size
+                            'placeholder_type': 'month_blank'
+                        })
+                    elif word_text == '20_____.' and 575 <= word_data['top'] <= 580:
+                        # Year field at y: 577.835
+                        signature_locations.append({
+                            'page': page_num,
+                            'text': word_text,
+                            'x': word_data['x0'],
+                            'y': word_data['top'],
+                            'width': word_data['x1'] - word_data['x0'],
+                            'height': word_data['bottom'] - word_data['top'],
+                            'font_size': word_data.get('size', 14),  # Bigger font size
+                            'placeholder_type': 'year_blank'
+                        })
+
+                
+                # Check for second section date patterns - in correct order: day, month, year (other templates)
                 elif word_text == '__________' and word_data['top'] > 400:
                     # First underscore pattern in second section - DAY field
                     signature_locations.append({

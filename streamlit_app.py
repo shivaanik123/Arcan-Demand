@@ -205,16 +205,20 @@ def _extract_placeholders(pdf):
     signature_locations = []
     
     for page_num, page in enumerate(pdf.pages):
+        # Track detected parentheses to avoid duplicates
+        detected_parentheses = set()
         try:
             words = page.extract_words()
             
             for word_data in words:
                 word_text = word_data['text'].strip()
                 
-                # Look for signature placeholders - "Signature" and "SIGN" (only bottom ones)
-                if word_text.lower() == "signature" or word_text.lower() == "sign":
-                    # Only add signatures that are in the bottom section (y > 500)
-                    if word_data['top'] > 500:
+                # Look for signature placeholders - "Signature", "SIGN", and "SIGN HERE" (only top section)
+                if (word_text.lower() == "signature" or word_text.lower() == "sign" or 
+                    word_text.lower() == "sign here"):
+                    # Only add signatures that are in the top section (y < 350) for "Signature of Agent for Landlord"
+                    # Based on debug output: "Signature of Agent for Landlord" is at y: 329.24, "SIGN HERE" is at y: 311.58
+                    if word_data['top'] < 345:
                         signature_locations.append({
                             'page': page_num,
                             'text': word_text,
@@ -313,19 +317,127 @@ def _extract_placeholders(pdf):
                         'placeholder_type': 'month_blank'
                     })
                 
-                # Check for checkbox patterns (for "By posting same at the above described premises")
-                if 'posting' in word_text.lower() and 'premises' in word_text.lower():
-                    # Look for checkbox near this text
+                # ENHANCED PARENTHESES DETECTION - Focus on "Proof of Service" pattern
+                # Look for parentheses: ( ), (), (, ), (.) .
+                # ENHANCED PARENTHESES DETECTION - Only detect complete patterns, not individual characters
+                if word_text.strip() in ['( )', '()', '(.)']:
+                    # Check if we've already detected this parentheses (avoid duplicates)
+                    parentheses_key = f"{word_data['x0']}_{word_data['top']}"
+                    if parentheses_key in detected_parentheses:
+                        print(f"⏭️ Skipping duplicate parentheses: '{word_text}' at ({word_data['x0']}, {word_data['top']})")
+                        continue
+                    
+                    print(f"🔍 Found parentheses pattern: '{word_text}' at ({word_data['x0']}, {word_data['top']})")
+                    
+                    # Look for service method text nearby
+                    nearby_text = ""
+                    service_type = "unknown"
+                    
+                    # Search for service method text in nearby words (expanded search)
+                    for other_word in words:
+                        if (abs(other_word['top'] - word_data['top']) < 100 and  # Same line or close
+                            abs(other_word['x0'] - word_data['x0']) < 800):  # Within reasonable distance
+                            nearby_text += other_word['text'] + " "
+                    
+                    # Check for service method patterns (more comprehensive)
+                    nearby_lower = nearby_text.lower()
+                    
+                    # Check for exact patterns from the image
+                    if any(phrase in nearby_lower for phrase in [
+                        'personally delivering same upon said tenant',
+                        'personally delivering',
+                        'personally delivered'
+                    ]):
+                        service_type = "personally_delivering"
+                    elif any(phrase in nearby_lower for phrase in [
+                        'posting same at the above described premises',
+                        'posting same at the above described',
+                        'posting same at',
+                        'posting'
+                    ]):
+                        service_type = "posting"
+                    
+                    print(f"🔍 Service type for '{word_text}': {service_type} (nearby: '{nearby_text.strip()}')")
+                    
+                    # Mark this parentheses as detected
+                    detected_parentheses.add(parentheses_key)
+                    
+                    # Add the parentheses checkbox (even if type is unknown - we'll handle it in checking logic)
                     signature_locations.append({
                         'page': page_num,
                         'text': word_text,
-                        'x': word_data['x0'] - 20,  # Position checkbox to the left
+                        'x': word_data['x0'],
                         'y': word_data['top'],
-                        'width': 15,
-                        'height': 15,
+                        'width': word_data['x1'] - word_data['x0'],
+                        'height': word_data['bottom'] - word_data['top'],
                         'font_size': word_data.get('size', 12),
-                        'placeholder_type': 'checkbox'
+                        'placeholder_type': 'existing_checkbox',
+                        'checkbox_type': service_type,
+                        'nearby_text': nearby_text.strip()
                     })
+                # Handle individual periods that might be part of (.) pattern
+                elif word_text.strip() == '.':
+                    # Only add if it's likely part of a checkbox pattern (check for nearby parentheses)
+                    has_nearby_parentheses = False
+                    for other_word in words:
+                        if (other_word['text'].strip() in ['(', ')'] and
+                            abs(other_word['x0'] - word_data['x0']) < 30 and 
+                            abs(other_word['top'] - word_data['top']) < 20):
+                            has_nearby_parentheses = True
+                            break
+                    
+                    if has_nearby_parentheses:
+                        # Check if we've already detected this period (avoid duplicates)
+                        period_key = f"{word_data['x0']}_{word_data['top']}"
+                        if period_key in detected_parentheses:
+                            print(f"⏭️ Skipping duplicate period: '{word_text}' at ({word_data['x0']}, {word_data['top']})")
+                            continue
+                        
+                        print(f"🔍 Found period with nearby parentheses: '{word_text}' at ({word_data['x0']}, {word_data['top']})")
+                        
+                        # Look for service method text nearby
+                        nearby_text = ""
+                        service_type = "unknown"
+                        
+                        for other_word in words:
+                            if (abs(other_word['top'] - word_data['top']) < 100 and 
+                                abs(other_word['x0'] - word_data['x0']) < 800):
+                                nearby_text += other_word['text'] + " "
+                        
+                        nearby_lower = nearby_text.lower()
+                        if any(phrase in nearby_lower for phrase in [
+                            'personally delivering same upon said tenant',
+                            'personally delivering',
+                            'personally delivered'
+                        ]):
+                            service_type = "personally_delivering"
+                        elif any(phrase in nearby_lower for phrase in [
+                            'posting same at the above described premises',
+                            'posting same at the above described',
+                            'posting same at',
+                            'posting'
+                        ]):
+                            service_type = "posting"
+                        
+                        print(f"🔍 Period service type: {service_type} (nearby: '{nearby_text.strip()}')")
+                        
+                        # Mark this period as detected
+                        detected_parentheses.add(period_key)
+                        
+                        signature_locations.append({
+                            'page': page_num,
+                            'text': word_text,
+                            'x': word_data['x0'],
+                            'y': word_data['top'],
+                            'width': word_data['x1'] - word_data['x0'],
+                            'height': word_data['bottom'] - word_data['top'],
+                            'font_size': word_data.get('size', 12),
+                            'placeholder_type': 'existing_checkbox',
+                            'checkbox_type': service_type,
+                            'nearby_text': nearby_text.strip()
+                        })
+                
+
         except Exception as e:
             st.warning(f"Error processing page {page_num}: {str(e)}")
             continue
@@ -433,7 +545,31 @@ def calculate_text_position(x, y, text_to_insert, font_size, placeholder_type):
 
 
 
-def create_signed_pdf_simple(pdf_path_or_bytes, signature_name, signature_locations, use_current_date, custom_date):
+def mark_checkbox(page, center_x, center_y, checkbox_size, mark_type="circle"):
+    if mark_type == "circle":
+        circle_radius = min(checkbox_size / 4, 3)
+        page.draw_circle(
+            fitz.Point(center_x, center_y),
+            circle_radius,
+            color=(0, 0, 0),
+            fill=(0, 0, 0),
+            width=1
+        )
+    elif mark_type == "check":
+        # Draw a checkmark manually using lines (✓)
+        # Adjust length/thickness based on checkbox size
+        check_size = min(checkbox_size, 10)
+        x, y = center_x, center_y
+
+        # These coordinates create a simple ✓ mark shape
+        page.draw_line(fitz.Point(x - check_size * 0.3, y),
+                       fitz.Point(x, y + check_size * 0.3),
+                       color=(0, 0, 0), width=1.2)
+        page.draw_line(fitz.Point(x, y + check_size * 0.3),
+                       fitz.Point(x + check_size * 0.5, y - check_size * 0.4),
+                       color=(0, 0, 0), width=1.2)
+
+def create_signed_pdf_simple(pdf_path_or_bytes, signature_name, signature_locations, use_current_date, custom_date, service_method=None):
     """Create signed PDF using PyMuPDF for better stream handling"""
     import traceback
 
@@ -481,6 +617,7 @@ def create_signed_pdf_simple(pdf_path_or_bytes, signature_name, signature_locati
         
         # 📌 3.5. EMBED CUSTOM FONT IF AVAILABLE
         custom_font_available = False
+        font_buffer = None
         font_path = "fonts/Playwrite_AU_QLD/PlaywriteAUQLD-VariableFont_wght.ttf"
         if os.path.exists(font_path):
             try:
@@ -490,6 +627,7 @@ def create_signed_pdf_simple(pdf_path_or_bytes, signature_name, signature_locati
                 print(f"✅ Custom font loaded: {font_path}")
             except Exception as e:
                 custom_font_available = False
+                font_buffer = None
                 print(f"❌ Failed to load custom font: {e}")
         else:
             print(f"❌ Font file not found: {font_path}")
@@ -607,38 +745,113 @@ def create_signed_pdf_simple(pdf_path_or_bytes, signature_name, signature_locati
                             render_mode=0
                         )
                     elif placeholder_type == 'checkbox':
-                        # Handle checkbox for "By posting same at the above described premises"
-                        # Draw a checked checkbox (X mark)
-                        checkbox_size = 12
-                        point = fitz.Point(x, y)
+                        # Handle checkbox for service methods (creating new checkboxes)
+                        # Check if this checkbox matches the user's selection
+                        checkbox_service_method = sig_loc.get('service_method', '')
+                        should_check = False
                         
-                        # Draw checkbox rectangle
-                        rect = fitz.Rect(x, y, x + checkbox_size, y + checkbox_size)
-                        page.draw_rect(rect, color=(0, 0, 0), width=1)
+                        if service_method:  # Only check if user has selected a service method
+                            if 'personally delivering' in checkbox_service_method and 'personally delivering' in service_method:
+                                should_check = True
+                            elif 'posting' in checkbox_service_method and 'posting' in service_method:
+                                should_check = True
                         
-                        # Draw X mark inside checkbox
-                        page.draw_line(
-                            fitz.Point(x + 2, y + 2),
-                            fitz.Point(x + checkbox_size - 2, y + checkbox_size - 2),
-                            color=(0, 0, 0),
-                            width=1
-                        )
-                        page.draw_line(
-                            fitz.Point(x + checkbox_size - 2, y + 2),
-                            fitz.Point(x + 2, y + checkbox_size - 2),
-                            color=(0, 0, 0),
-                            width=1
-                        )
+                        if should_check:
+                            # Draw a checked checkbox (X mark)
+                            checkbox_size = 12
+                            point = fitz.Point(x, y)
+                            
+                            # Draw checkbox rectangle
+                            rect = fitz.Rect(x, y, x + checkbox_size, y + checkbox_size)
+                            page.draw_rect(rect, color=(0, 0, 0), width=1)
+                            
+                            # Draw X mark inside checkbox
+                            page.draw_line(
+                                fitz.Point(x + 2, y + 2),
+                                fitz.Point(x + checkbox_size - 2, y + checkbox_size - 2),
+                                color=(0, 0, 0),
+                                width=1
+                            )
+                            page.draw_line(
+                                fitz.Point(x + checkbox_size - 2, y + 2),
+                                fitz.Point(x + 2, y + checkbox_size - 2),
+                                color=(0, 0, 0),
+                                width=1
+                            )
+                            print(f"✅ Created and checked new checkbox for: {checkbox_service_method}")
+                        else:
+                            print(f"⏭️ Skipped creating checkbox for: {checkbox_service_method} (doesn't match selected service method)")
+                    
+                    elif placeholder_type == 'existing_checkbox':
+                        # Handle existing checkboxes in the PDF
+                        checkbox_type = sig_loc.get('checkbox_type', 'unknown')
+                        should_check = False
+                        
+                        print(f"🔍 Processing parentheses: type={checkbox_type}, service_method='{service_method}'")
+                        
+                        if service_method:  # Only check if user has selected a service method
+                            # Enhanced matching logic
+                            service_method_lower = service_method.lower()
+                            nearby_text = sig_loc.get('nearby_text', '').lower()
+                            
+                            # EXCLUSIVE matching - only check the one that matches the user's selection
+                            if service_method == "By personally delivering same upon said tenant":
+                                # User selected personally delivering - ONLY check that one
+                                if ('personally delivering' in nearby_text and 'tenant' in nearby_text) or checkbox_type == 'personally_delivering':
+                                    should_check = True
+                                    print(f"✅ Matched personally_delivering parentheses")
+                                else:
+                                    print(f"⏭️ Skipping - this is not the personally delivering checkbox")
+                            elif service_method == "By posting same at the above described premises in the absence of said tenant":
+                                # User selected posting - ONLY check that one
+                                if ('posting' in nearby_text and 'premises' in nearby_text) or checkbox_type == 'posting':
+                                    should_check = True
+                                    print(f"✅ Matched posting parentheses")
+                                else:
+                                    print(f"⏭️ Skipping - this is not the posting checkbox")
+                            else:
+                                # For any other service method, be very strict about matching
+                                print(f"⚠️ Unknown service method: '{service_method}' - not checking any parentheses")
+                        
+                        if should_check:
+                            # Check the parentheses by adding a checkmark symbol (✓)
+                            checkbox_text = sig_loc.get('text', '')
+                            checkbox_size = max(sig_loc['width'], sig_loc['height'], 12)
+                            
+                            # Calculate the center of the parentheses
+                            center_x = x + checkbox_size / 2
+                            center_y = y + checkbox_size / 2
+                            
+                            # Check if this is a period-based checkbox (.) or regular parentheses
+                            if checkbox_text.strip() == '.' or '(.)' in checkbox_text:
+                                # For period-based checkboxes, fill in the period with a solid circle
+                                mark_checkbox(page, center_x, center_y, checkbox_size, "circle")
+                                print(f"✅ Filled period checkbox")
+                            else:
+                                # For regular parentheses, add checkmark using manual drawing
+                                mark_checkbox(page, center_x, center_y, checkbox_size, "check")
+                                print(f"✅ Added checkmark to parentheses")
+                            
+                            print(f"✅ Checked parentheses: {checkbox_type} at position ({x}, {y}) - text: {checkbox_text}")
+                        else:
+                            print(f"⏭️ Skipped parentheses: {checkbox_type} (doesn't match selected service method)")
                     else:
                         # Use text-based signature with cursive styling
                         text_to_insert = create_handwritten_signature(signature_name)
-                        point = calculate_text_position(x, y, text_to_insert, font_size, placeholder_type)
+                        
+                        # Position signature based on location - top signature above line, bottom signature on line
+                        # Based on debug output: "SIGN HERE" is at y: 311.58, underscore line is at y: 315.66
+                        # Top signature (y < 350) should be above the line, bottom signature (y > 500) should be on the line
+                        if y < 350:  # Top signature - position above the line
+                            point = fitz.Point(x, y - 13)  # Move up 15 points above the line
+                        else:  # Bottom signature - position right on the line
+                            point = fitz.Point(x, y)  # Position signature right on the line
                         
                         # Use elegant styling for signature with cursive font
                         font_size_adjusted = font_size + 2  # Slightly larger for elegance
                         
                         # Use custom Playwrite font for italic/cursive signature
-                        if custom_font_available:
+                        if custom_font_available and font_buffer is not None:
                             try:
                                 # Use the embedded custom font
                                 page.insert_text(
@@ -665,7 +878,7 @@ def create_signed_pdf_simple(pdf_path_or_bytes, signature_name, signature_locati
                                     )
                                     print(f"✅ Used Times Italic fallback for signature: {text_to_insert}")
                                 except:
-                                    # Final fallback to helvetica
+                                    # Final fallback to helvetica italic
                                     page.insert_text(
                                         point,
                                         text_to_insert,
@@ -688,7 +901,7 @@ def create_signed_pdf_simple(pdf_path_or_bytes, signature_name, signature_locati
                                 )
                                 print(f"✅ Used Times Italic (no custom font): {text_to_insert}")
                             except:
-                                # Final fallback to helvetica
+                                # Final fallback to helvetica italic
                                 page.insert_text(
                                     point,
                                     text_to_insert,
@@ -746,23 +959,15 @@ def create_signed_pdf_simple(pdf_path_or_bytes, signature_name, signature_locati
 def main():
     st.set_page_config(
         page_title="Demand Letter Generator",
-        page_icon="📄",
         layout="wide"
     )
     
-    st.title("📄 Demand Letter Generator")
-    st.markdown("Upload PDFs or generate from templates with signatures and dates")
+    st.title("Demand Letter Generator")
+    st.markdown("Upload PDFs with signatures and dates")
     
     # Sidebar for configuration
     with st.sidebar:
         st.header("Configuration")
-        
-        # Mode selection
-        mode = st.radio(
-            "Choose Mode",
-            ["Upload PDFs", "Generate from Templates"],
-            help="Upload your own PDFs or generate from our templates"
-        )
         
         signature_name = st.text_input(
             "Signer Name",
@@ -775,33 +980,67 @@ def main():
         
         # Show signature preview
         if signature_name:
-            st.subheader("📝 Signature Preview")
+            st.subheader("Signature Preview")
             preview_signature = create_handwritten_signature(signature_name)
             st.markdown(f"**Preview:** `{preview_signature}`")
-            st.markdown("*Beautiful cursive signature using Playwrite font*")
         
         # Date options
-        use_current_date = st.checkbox("Use Current Date", value=True)
+        st.subheader("Date Settings")
         
-        if not use_current_date:
-            custom_date = st.date_input("Select Custom Date")
-        else:
+        # Ask user for their preferred date
+        date_option = st.radio(
+            "Choose Date Option",
+            ["Use Current Date", "Select Custom Date"],
+            help="Choose whether to use today's date or select a specific date"
+        )
+        
+        if date_option == "Use Current Date":
+            use_current_date = True
             custom_date = None
+            st.info(f"Will use current date: {datetime.now().strftime('%B %d, %Y')}")
+        else:
+            use_current_date = False
+            custom_date = st.date_input(
+                "Select Date for Documents",
+                value=datetime.now().date(),
+                help="Choose the date to appear on all generated documents"
+            )
+            st.info(f"Selected date: {custom_date.strftime('%B %d, %Y')}")
+        
+        # Checkbox options
+        st.subheader("Service Method")
+        
+        service_method = st.radio(
+            "Choose Service Method",
+            [
+                "By personally delivering same upon said tenant",
+                "By posting same at the above described premises in the absence of said tenant",
+            ],
+            help="Select which service method checkbox should be checked on the documents"
+        )
+        
+        st.info(f"Will check: **{service_method}**")
     
     # Main content
     col1, col2 = st.columns([2, 1])
     
     with col1:
-        if mode == "Upload PDFs":
-            st.header("Upload PDFs")
-            
-            uploaded_files = st.file_uploader(
-                "Choose PDF files to add signatures to",
-                type=['pdf'],
-                accept_multiple_files=True
-            )
-            
-            if uploaded_files:
+        # Show selected date prominently
+        if use_current_date:
+            st.success(f"**Using Current Date:** {datetime.now().strftime('%B %d, %Y')}")
+        else:
+            st.success(f"**Selected Date:** {custom_date.strftime('%B %d, %Y')}")
+        
+        st.divider()
+        st.header("Upload PDFs")
+        
+        uploaded_files = st.file_uploader(
+            "Choose PDF files to add signatures to",
+            type=['pdf'],
+            accept_multiple_files=True
+        )
+        
+        if uploaded_files:
                 st.success(f"Uploaded {len(uploaded_files)} file(s)")
                 
                 # Process files
@@ -844,13 +1083,38 @@ def main():
                                 if signature_locations:
                                     st.write(f"Found {len(signature_locations)} signature location(s) in template")
                                     
+                                    # Show parentheses detection details
+                                    parentheses_found = [loc for loc in signature_locations if loc.get('placeholder_type') in ['checkbox', 'existing_checkbox']]
+                                    if parentheses_found:
+                                        st.write(f"Found {len(parentheses_found)} parentheses checkbox(es):")
+                                        for cb in parentheses_found:
+                                            if cb.get('placeholder_type') == 'existing_checkbox':
+                                                st.write(f"  - Parentheses: {cb.get('checkbox_type', 'unknown')} (near: {cb.get('nearby_text', 'N/A')})")
+                                            else:
+                                                st.write(f"  - Service method parentheses: {cb.get('service_method', 'N/A')}")
+                                        
+                                        # Debug: Show what service method was selected
+                                        st.write(f"🔍 Selected service method: {service_method}")
+                                    else:
+                                        st.write("No parentheses checkboxes found in template")
+                                        st.warning("⚠️ No parentheses detected. This might be because:")
+                                        st.write("  - Parentheses are not in the expected format ( )")
+                                        st.write("  - Service method text is not nearby")
+                                        st.write("  - PDF structure is different than expected")
+                                        
+                                        # Debug: Show all detected text to help troubleshoot
+                                        st.write("🔍 Debug: All detected text on this page:")
+                                        for loc in signature_locations:
+                                            st.write(f"  - {loc.get('text', 'N/A')} (type: {loc.get('placeholder_type', 'N/A')})")
+                                    
                                     # Add signatures at the found locations using the uploaded PDF
                                     processed_pages = create_signed_pdf_simple(
                                         pdf_bytes,  # Pass BytesIO object directly
                                         signature_name,
                                         signature_locations,
                                         use_current_date,
-                                        custom_date
+                                        custom_date,
+                                        service_method
                                     )
                                     
                                     if processed_pages:
@@ -897,7 +1161,7 @@ def main():
                             
                             # Download button for zip file
                             st.download_button(
-                                label="📦 Download All Signed PDFs (ZIP)",
+                                label="Download All Signed PDFs (ZIP)",
                                 data=zip_bytes,
                                 file_name=f"signed_pdfs_{datetime.now().strftime('%Y%m%d_%H%M%S')}.zip",
                                 mime="application/zip"
@@ -930,155 +1194,24 @@ def main():
                                 st.divider()
                     else:
                         st.error("No files were successfully processed")
-        
-        else:  # Generate from Templates
-            st.header("Generate from Templates")
-            
-            # Template selection
-            selected_template = st.selectbox(
-                "Select Template",
-                options=list(TEMPLATES.keys()),
-                help="Choose the template to use for generating demand letters"
-            )
-            
-            # Show template description
-            if selected_template in TEMPLATES:
-                template_info = TEMPLATES[selected_template]
-                st.info(f"**{selected_template}**: {template_info['description']}")
-                
-                if template_info['include_date']:
-                    st.success("✅ This template includes date fields")
-                else:
-                    st.info("ℹ️ This template only includes signature fields")
-            
-            # Number of letters to generate
-            num_letters = st.number_input(
-                "Number of Letters to Generate",
-                min_value=1,
-                max_value=50,
-                value=1,
-                help="How many demand letters to generate"
-            )
-            
-            # Generate letters
-            if st.button("Generate Demand Letters", type="primary"):
-                if not signature_name:
-                    st.error("Please enter a signer name")
-                    return
-                
-                template_info = TEMPLATES[selected_template]
-                template_path = template_info['file_path']
-                
-                # Check if template file exists
-                if not os.path.exists(template_path):
-                    st.error(f"Template file not found: {template_path}")
-                    return
-                
-                # Find signature placeholders in template
-                with st.spinner("Analyzing template..."):
-                    signature_locations = find_signature_placeholders_simple(template_path)
-                    
-                    if signature_locations:
-                        st.success(f"Found {len(signature_locations)} signature location(s) in template")
-                    else:
-                        st.warning("No signature placeholders found in template")
-                
-                # Generate letters
-                processed_files = []
-                
-                with st.spinner(f"Generating {num_letters} demand letter(s)..."):
-                    for i in range(num_letters):
-                        st.write(f"Generating letter {i+1}/{num_letters}...")
-                        
-                        # Generate PDF from template
-                        processed_pages = create_signed_pdf_simple(
-                            template_path,
-                            signature_name,
-                            signature_locations,
-                            use_current_date,
-                            custom_date
-                        )
-                        
-                        if processed_pages:
-                            # Add each individual page as a separate file
-                            for page_info in processed_pages:
-                                processed_files.append({
-                                    'name': f"{selected_template.replace(' ', '_')}_Letter_{i+1}_page_{page_info['page_num']}.pdf",
-                                    'data': page_info['data'],
-                                    'locations_found': len(signature_locations),
-                                    'page_num': page_info['page_num']
-                                })
-                
-                # Display results
-                if processed_files:
-                    st.success(f"Successfully generated {len(processed_files)} demand letter(s)")
-                    
-                    # Create zip file for batch download
-                    if len(processed_files) > 1:
-                        with tempfile.NamedTemporaryFile(delete=False, suffix='.zip') as tmp_zip:
-                            with zipfile.ZipFile(tmp_zip.name, 'w') as zip_file:
-                                for file_info in processed_files:
-                                    zip_file.writestr(file_info['name'], file_info['data'])
-                            
-                            # Read the zip file
-                            with open(tmp_zip.name, 'rb') as f:
-                                zip_bytes = f.read()
-                            
-                            # Clean up
-                            os.unlink(tmp_zip.name)
-                        
-                        # Download button for zip file
-                        st.download_button(
-                            label="📦 Download All Letters (ZIP)",
-                            data=zip_bytes,
-                            file_name=f"demand_letters_{selected_template.replace(' ', '_')}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.zip",
-                            mime="application/zip"
-                        )
-                    
-                    # Individual download buttons
-                    with col2:
-                        st.header("Results")
-                        
-                        for file_info in processed_files:
-                            st.write(f"**{file_info['name']}**")
-                            st.write(f"Signature locations: {file_info['locations_found']}")
-                            
-                            # Show page number if available
-                            if 'page_num' in file_info:
-                                st.write(f"Page: {file_info['page_num']}")
-                            
-                            # Create download button
-                            st.download_button(
-                                label=f"Download {file_info['name']}",
-                                data=file_info['data'],
-                                file_name=file_info['name'],
-                                mime="application/pdf"
-                            )
-                            st.divider()
-                else:
-                    st.error("No letters were successfully generated")
     
     with col2:
         st.header("Instructions")
         st.markdown("""
-        **Upload PDFs Mode:**
+        **Upload PDFs:**
         1. **Upload your PDFs** (with or without placeholders)
         2. **Enter signer name** in the sidebar
-        3. **Click Generate** to match to templates and add signatures
-        4. **Download** signed PDFs (split into individual pages)
-        
-        **Generate from Templates Mode:**
-        1. **Select template** (Florida or Georgia)
-        2. **Enter signer name** in the sidebar
-        3. **Choose number of letters** to generate
-        4. **Click Generate** to create demand letters
-        5. **Download** letters individually or as ZIP
+        3. **Choose date settings** (current or custom date)
+        4. **Select service method** (which checkbox to check)
+        5. **Click Add Signatures** to process PDFs
+        6. **Download** signed PDFs (split into individual pages)
         
         The system will:
         - **Analyze uploaded PDFs** and match to appropriate templates
         - **Find signature placeholders** in templates
         - **Add signatures** in correct locations
         - **Add dates** where appropriate
+        - **Check appropriate service method** checkbox
         - **Split multi-page PDFs into individual pages**
         - **Preserve PDF formatting**
         - **Show matching confidence** for each file

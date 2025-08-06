@@ -215,6 +215,7 @@ def find_signature_placeholders_simple(pdf_path_or_bytes, template_name=None):
 def _extract_placeholders(pdf, template_name=None):
     """Extract placeholders from PDF object with template-specific positioning"""
     print(f"🔍 Template detection: Processing with template_name='{template_name}'")
+    print(f"📄 Total pages in PDF: {len(pdf.pages)}")
     signature_locations = []
     
     for page_num, page in enumerate(pdf.pages):
@@ -250,8 +251,9 @@ def _extract_placeholders(pdf, template_name=None):
                             'placeholder_type': 'signature'
                         })
                 
-                # Check for long underscore lines (signature lines) - template-specific positioning
-                if len(word_text) > 10 and all(c in '_' for c in word_text):
+                # Check for LONG underscore lines (signature lines) - template-specific positioning
+                # Use length > 20 to avoid catching date underscores (which are shorter)
+                if len(word_text) > 20 and all(c in '_' for c in word_text):
                     print(f"🔍 Found underscore line: '{word_text}' at y: {word_data['top']}")
                     should_add = False
                     
@@ -292,47 +294,27 @@ def _extract_placeholders(pdf, template_name=None):
                             'placeholder_type': 'signature'
                         })
                 
-                # Check for Florida template specific patterns - ONLY the main date fields
-                # Only detect the specific patterns we want, not generic day/month text
-                if '______day' in word_text:
-                    signature_locations.append({
-                        'page': page_num,
-                        'text': word_text,
-                        'x': word_data['x0'],
-                        'y': word_data['top'],
-                        'width': word_data['x1'] - word_data['x0'],
-                        'height': word_data['bottom'] - word_data['top'],
-                        'font_size': word_data.get('size', 12),
-                        'placeholder_type': 'day_blank'
-                    })
-                elif 'of___________,' in word_text:
-                    signature_locations.append({
-                        'page': page_num,
-                        'text': word_text,
-                        'x': word_data['x0'],
-                        'y': word_data['top'],
-                        'width': word_data['x1'] - word_data['x0'],
-                        'height': word_data['bottom'] - word_data['top'],
-                        'font_size': word_data.get('size', 12),
-                        'placeholder_type': 'month_blank'
-                    })
-                elif ('20______.' in word_text or '20____' in word_text) and template_name != "Alabama Template":
-                    # Generic year pattern - but exclude Alabama Template (has specific handling)
-                    signature_locations.append({
-                        'page': page_num,
-                        'text': word_text,
-                        'x': word_data['x0'],
-                        'y': word_data['top'],
-                        'width': word_data['x1'] - word_data['x0'],
-                        'height': word_data['bottom'] - word_data['top'],
-                        'font_size': word_data.get('size', 12),
-                        'placeholder_type': 'year_blank'
-                    })
-                # Check for Alabama template specific date patterns
-                elif template_name == "Alabama Template":
-                    # Alabama date patterns based on analysis
-                    if word_text == '__________' and 560 <= word_data['top'] <= 565:
-                        # Day field at y: 561.646
+                # FLEXIBLE underscore detection - find underscores within text
+                # Look for patterns like "____day", "of____", "20____", etc.
+                if '___' in word_text and len([c for c in word_text if c == '_']) >= 3:
+                    print(f"🔍 CHECKING underscore '{word_text}' at y: {word_data['top']}")
+                    
+                    # Quick check: skip signature underscores (long lines near signature words)
+                    nearby_words = []
+                    for other_word in words:
+                        if (abs(other_word['top'] - word_data['top']) < 20 and  # Same line
+                            abs(other_word['x0'] - word_data['x0']) < 150):     # Close by
+                            nearby_words.append(other_word['text'].lower())
+                    
+                    nearby_text = ' '.join(nearby_words)
+                    print(f"🔍 Nearby text: '{nearby_text}'")
+                    
+                    # Skip signature underscores (long lines near signature-related words)
+                    if (len(word_text) > 15 and 
+                        any(sig_word in nearby_text for sig_word in ['signature', 'agent', 'landlord', 'shivaani'])):
+                        print(f"⏭️ Skipped signature underscore at y: {word_data['top']}")
+                    else:
+                        # Add as date underscore
                         signature_locations.append({
                             'page': page_num,
                             'text': word_text,
@@ -340,71 +322,13 @@ def _extract_placeholders(pdf, template_name=None):
                             'y': word_data['top'],
                             'width': word_data['x1'] - word_data['x0'],
                             'height': word_data['bottom'] - word_data['top'],
-                            'font_size': word_data.get('size', 14),  # Bigger font size
-                            'placeholder_type': 'day_blank'
+                            'font_size': word_data.get('size', 12),
+                            'placeholder_type': 'underscore_blank'
                         })
-                    elif word_text == '________________,' and 575 <= word_data['top'] <= 580:
-                        # Month field at y: 577.835
-                        signature_locations.append({
-                            'page': page_num,
-                            'text': word_text,
-                            'x': word_data['x0'],
-                            'y': word_data['top'],
-                            'width': word_data['x1'] - word_data['x0'],
-                            'height': word_data['bottom'] - word_data['top'],
-                            'font_size': word_data.get('size', 14),  # Bigger font size
-                            'placeholder_type': 'month_blank'
-                        })
-                    elif word_text == '20_____.' and 575 <= word_data['top'] <= 580:
-                        # Year field at y: 577.835
-                        signature_locations.append({
-                            'page': page_num,
-                            'text': word_text,
-                            'x': word_data['x0'],
-                            'y': word_data['top'],
-                            'width': word_data['x1'] - word_data['x0'],
-                            'height': word_data['bottom'] - word_data['top'],
-                            'font_size': word_data.get('size', 14),  # Bigger font size
-                            'placeholder_type': 'year_blank'
-                        })
+                        print(f"✅ Found DATE underscore at y: {word_data['top']}")
 
-                
-                # Check for second section date patterns - in correct order: day, month, year (other templates)
-                elif word_text == '__________' and word_data['top'] > 400:
-                    # First underscore pattern in second section - DAY field
-                    signature_locations.append({
-                        'page': page_num,
-                        'text': word_text,
-                        'x': word_data['x0'],
-                        'y': word_data['top'],
-                        'width': word_data['x1'] - word_data['x0'],
-                        'height': word_data['bottom'] - word_data['top'],
-                        'font_size': word_data.get('size', 12),
-                        'placeholder_type': 'day_blank'
-                    })
-                elif word_text == '__________________,' and word_data['top'] > 400:
-                    # Second underscore pattern in second section - MONTH field
-                    signature_locations.append({
-                        'page': page_num,
-                        'text': word_text,
-                        'x': word_data['x0'],
-                        'y': word_data['top'],
-                        'width': word_data['x1'] - word_data['x0'],
-                        'height': word_data['bottom'] - word_data['top'],
-                        'font_size': word_data.get('size', 12),
-                        'placeholder_type': 'month_blank'
-                    })
-                elif word_text.lower() == 'month' and word_data['top'] > 400:
-                    signature_locations.append({
-                        'page': page_num,
-                        'text': word_text,
-                        'x': word_data['x0'],
-                        'y': word_data['top'],
-                        'width': word_data['x1'] - word_data['x0'],
-                        'height': word_data['bottom'] - word_data['top'],
-                        'font_size': word_data.get('size', 12),
-                        'placeholder_type': 'month_blank'
-                    })
+
+
                 
                 # ENHANCED PARENTHESES DETECTION - Focus on "Proof of Service" pattern
                 # Handle both complete patterns and individual opening parentheses
@@ -551,16 +475,87 @@ def _extract_placeholders(pdf, template_name=None):
     print(f"📋 Checkboxes found: {checkbox_count}")
     print("---\n")
     
+    # Post-process underscore_blank placeholders to assign them to day, month, year, signature based on template
+    underscore_blanks = [loc for loc in signature_locations if loc.get('placeholder_type') == 'underscore_blank']
+    if underscore_blanks:
+        # Sort by Y position (top to bottom) to determine order
+        underscore_blanks.sort(key=lambda x: x['y'])
+        print(f"🔄 Processing {len(underscore_blanks)} underscore blanks for template '{template_name}'...")
+        
+        # Template-specific underscore patterns
+        if template_name and 'florida' in template_name.lower():
+            # Florida: day, month, year, signature (repeating every 4)
+            type_pattern = ['day_blank', 'month_blank', 'year_blank', 'signature']
+            print(f"📋 Florida pattern: day, month, year, signature (repeating)")
+        elif template_name and 'alabama' in template_name.lower():
+            # Alabama: signature, day, month, year, signature (5 total, rest blank)
+            type_pattern = ['signature', 'day_blank', 'month_blank', 'year_blank', 'signature']
+            print(f"📋 Alabama pattern: signature, day, month, year, signature")
+        else:
+            # Georgia (default): first 3 are day, month, year
+            type_pattern = ['day_blank', 'month_blank', 'year_blank']
+            print(f"📋 Georgia/default pattern: day, month, year")
+        
+        print(f"📋 Found {len(underscore_blanks)} underscore blanks to assign:")
+        for i, blank in enumerate(underscore_blanks):
+            print(f"  {i+1}. Underscore at y:{blank['y']}, x:{blank['x']}")
+            
+        # Assign types based on content analysis, not just position
+        for i, blank in enumerate(underscore_blanks):
+            if template_name and 'florida' in template_name.lower():
+                # Florida: Smart assignment based on text content
+                text = blank['text'].lower()
+                if 'day' in text:
+                    assigned_type = 'day_blank'
+                elif 'of' in text and ',' in text:  # "of___________,"
+                    assigned_type = 'month_blank'
+                elif ',' in text and len(text) > 10:  # Month fields often have commas: "__________________, "
+                    assigned_type = 'month_blank'
+                elif text.startswith('20'):  # "20____"
+                    assigned_type = 'year_blank'
+                elif len(text) > 25:  # Very long underscore = signature (raised threshold)
+                    assigned_type = 'signature'
+                else:
+                    # For remaining short underscores, cycle through day/month/year
+                    remaining_pattern = ['day_blank', 'month_blank', 'year_blank']
+                    assigned_type = remaining_pattern[i % 3]
+            elif template_name and 'alabama' in template_name.lower():
+                # Alabama: first 5 follow pattern, rest are blank
+                if i < len(type_pattern):
+                    assigned_type = type_pattern[i]
+                else:
+                    print(f"⏭️ Alabama: Skipping extra underscore #{i+1} (leaving blank)")
+                    continue
+            else:
+                # Georgia: first 3 follow pattern, rest are blank
+                if i < len(type_pattern):
+                    assigned_type = type_pattern[i]
+                else:
+                    print(f"⏭️ Georgia: Skipping extra underscore #{i+1} (leaving blank)")
+                    continue
+            
+            # Find this blank in signature_locations and update its type
+            assignment_made = False
+            for loc in signature_locations:
+                if (loc.get('placeholder_type') == 'underscore_blank' and 
+                    loc['x'] == blank['x'] and loc['y'] == blank['y']):
+                    loc['placeholder_type'] = assigned_type
+                    print(f"✅ Assigned underscore #{i+1} at y:{blank['y']} as {assigned_type}")
+                    assignment_made = True
+                    break
+            if not assignment_made:
+                print(f"❌ Failed to assign underscore #{i+1} at y:{blank['y']} as {assigned_type}")
+    
     return signature_locations
 
 
 
-def extract_property_and_unit_info(pdf_path_or_bytes, template_name):
-    """Extract property name and unit number from PDF for file naming"""
-    return extract_property_and_unit_info_from_page(pdf_path_or_bytes, template_name, 0)
+def extract_unit_info(pdf_path_or_bytes, template_name):
+    """Extract unit number from PDF for file naming"""
+    return extract_unit_info_from_page(pdf_path_or_bytes, template_name, 0)
 
-def extract_property_and_unit_info_from_page(pdf_path_or_bytes, template_name, page_number=0):
-    """Extract property name and unit number from a specific page of PDF for file naming"""
+def extract_unit_info_from_page(pdf_path_or_bytes, template_name, page_number=0):
+    """Extract unit number from a specific page of PDF for file naming"""
     try:
         # Handle both file paths and bytes
         if isinstance(pdf_path_or_bytes, io.BytesIO):
@@ -572,7 +567,7 @@ def extract_property_and_unit_info_from_page(pdf_path_or_bytes, template_name, p
             with open(pdf_path_or_bytes, 'rb') as f:
                 pdf_bytes = f.read()
         else:
-            return "Unknown Property", "0000"
+            return "0000"
         
         # Create a fresh BytesIO and analyze
         file_buffer = io.BytesIO(pdf_bytes)
@@ -586,75 +581,135 @@ def extract_property_and_unit_info_from_page(pdf_path_or_bytes, template_name, p
             page = pdf.pages[page_number]
             words = page.extract_words()
             
-            property_name = "Unknown Property"
             unit_number = "0000"
             
             if template_name == "Florida Template":
-                # Look for "The Hangar" pattern and address like "8890 Ransley Station Blvd 0117"
-                # Unit number is the last 4-digit number in the address line
-                property_name = "The Hangar"  # Default for Florida
+                # Extract unit number from address
+                all_units = []  # Collect all potential unit numbers
+                
                 for i, word_data in enumerate(words):
                     word_text = word_data['text'].strip()
-                    if word_text.lower() == 'hangar':
-                        property_name = "The Hangar"
-                    # Look for 4-digit numbers that could be unit numbers (like 0117)
-                    elif (len(word_text) == 4 and word_text.isdigit()):
-                        unit_number = word_text
+                    
+                    # Look for 4-digit numbers that could be unit numbers
+                    if (len(word_text) == 4 and word_text.isdigit()):
+                        all_units.append((word_text, word_data['top']))
+                
+                # Use the second 4-digit number found (skip 8890 which is the address)
+                if len(all_units) >= 2:
+                    unit_number = all_units[1][0]  # Take the second 4-digit number (actual unit)
+                elif len(all_units) == 1:
+                    unit_number = all_units[0][0]  # Fallback to first if only one found
                         
             elif template_name == "Georgia Template":
-                # Look for "Apartment Number: XXXX" pattern
-                property_name = "Wesleyan Management"  # Default based on template
+                # Extract apartment number
+                all_units = []  # Collect all potential unit numbers
+                
                 for i, word_data in enumerate(words):
                     word_text = word_data['text'].strip()
+                    
+                    # Look for apartment number pattern
                     if word_text.lower() == 'apartment' and i + 2 < len(words):
                         if words[i + 1]['text'].strip().lower() == 'number:':
                             unit_number = words[i + 2]['text'].strip()
                             break
+                    # Collect all 4-digit numbers as backup
+                    elif len(word_text) == 4 and word_text.isdigit():
+                        all_units.append((word_text, word_data['top']))
+                
+                # If no "Apartment Number:" pattern found, use second 4-digit number (skip address)
+                if unit_number == "0000" and all_units:
+                    if len(all_units) >= 2:
+                        unit_number = all_units[1][0]  # Take the second 4-digit number (actual unit)
+                    else:
+                        unit_number = all_units[0][0]  # Fallback to first if only one found
                             
             elif template_name == "Alabama Template":
-                # Look for "Haven The" and extract unit from address patterns:
-                # Pattern 1: "2221 (XXXX) Chace Lake Drive" - first number
-                # Pattern 2: "801 Montclair Road Apt # 1201" - number after "Apt #"
-                property_name = "Haven The"  # Default for Alabama
+                # Extract unit from address patterns
+                all_units = []  # Collect all potential unit numbers
+                
                 for i, word_data in enumerate(words):
                     word_text = word_data['text'].strip()
-                    if word_text.lower() == 'haven' and i + 1 < len(words):
-                        if words[i + 1]['text'].strip().lower() == 'the':
-                            property_name = "Haven The"
                     
-                    # Pattern 2: Look for "Apt #" followed by unit number
-                    elif word_text.lower() == 'apt' and i + 2 < len(words):
+                    # Pattern 2: Look for "Apt #" followed by unit number (highest priority)
+                    if word_text.lower() == 'apt' and i + 2 < len(words):
                         if words[i + 1]['text'].strip() == '#':
                             potential_unit = words[i + 2]['text'].strip()
                             if potential_unit.isdigit():
                                 unit_number = potential_unit
+                                print(f"✅ Found Apt # pattern: {unit_number}")
                                 break
                     
-                    # Pattern 1: Look for first 4-digit number in tenant address area (like 2221)
-                    elif (len(word_text) == 4 and word_text.isdigit() and 
-                          120 <= word_data['top'] <= 140 and unit_number == "0000"):
-                        # Only use if we haven't found an "Apt #" pattern yet
-                        unit_number = word_text
+                    # Pattern 1: Collect all 4-digit numbers in tenant address area
+                    elif len(word_text) == 4 and word_text.isdigit():
+                        all_units.append((word_text, word_data['top']))
+                
+                # If no "Apt #" pattern found, use second 4-digit number (skip address)
+                if unit_number == "0000" and all_units:
+                    if len(all_units) >= 2:
+                        unit_number = all_units[1][0]  # Take the second 4-digit number (actual unit)
+                        print(f"✅ Found second 4-digit number: {unit_number}")
+                    else:
+                        unit_number = all_units[0][0]  # Fallback to first if only one found
+                        print(f"✅ Found only one 4-digit number: {unit_number}")
             
-            print(f"🏢 Extracted from page {page_number + 1}: Property='{property_name}', Unit='{unit_number}'")
-            return property_name, unit_number
+            # Debug: Show what we found on this page
+            print(f"🏢 Extracted from page {page_number + 1}: Unit='{unit_number}'")
+            return unit_number
             
     except Exception as e:
-        print(f"⚠️ Error extracting property/unit info from page {page_number + 1}: {e}")
-        return "Unknown Property", "0000"
+        print(f"⚠️ Error extracting unit info from page {page_number + 1}: {e}")
+        return "0000"
 
-def create_handwritten_signature(name):
-    """Create a beautiful cursive signature"""
+def create_handwritten_signature(name, style="elegant"):
+    """Create a realistic handwritten signature with multiple style options"""
     parts = name.split()
-    if len(parts) >= 2:
-        first_name = parts[0]
-        last_name = parts[-1]
-        
-        # Create a flowing cursive signature with full first and last name
-        signature = f"{first_name} {last_name}"
+    
+    if style == "elegant":
+        # Elegant full name signature
+        if len(parts) >= 2:
+            first_name = parts[0]
+            last_name = parts[-1]
+            signature = f"{first_name} {last_name}"
+        else:
+            signature = name
+            
+    elif style == "stylized":
+        # Stylized signature with flourishes
+        if len(parts) >= 2:
+            first_name = parts[0]
+            last_name = parts[-1]
+            if len(last_name) > 4:
+                signature = f"{first_name} {last_name[:2]}{'~' * (len(last_name) - 2)}"
+            else:
+                signature = f"{first_name} ~ {last_name}"
+        else:
+            if len(name) > 4:
+                signature = f"{name[:3]}{'~' * (len(name) - 3)}"
+            else:
+                signature = f"{name}~"
+                
+    elif style == "initials":
+        # Initial-based signature
+        if len(parts) >= 2:
+            first_initial = parts[0][0].upper()
+            last_initial = parts[-1][0].upper()
+            signature = f"{first_initial}. {last_initial}."
+        else:
+            signature = f"{name[0].upper()}."
+            
+    elif style == "professional":
+        # Professional full signature
+        if len(parts) >= 2:
+            # Use full name with middle initial if available
+            if len(parts) == 3:
+                signature = f"{parts[0]} {parts[1][0]}. {parts[2]}"
+            else:
+                signature = f"{parts[0]} {parts[-1]}"
+        else:
+            signature = name
     else:
-        # Single name - add flourish
-        signature = f"{name}"
+        # Default elegant style
+        signature = name
     
     return signature
 
@@ -766,7 +821,7 @@ def mark_checkbox(page, center_x, center_y, checkbox_size, mark_type="circle"):
                        fitz.Point(x + check_size * 0.5, y - check_size * 0.4),
                        color=(0, 0, 0), width=1.2)
 
-def create_signed_pdf_simple(pdf_path_or_bytes, signature_name, signature_locations, use_current_date, custom_date, service_method=None):
+def create_signed_pdf_simple(pdf_path_or_bytes, signature_name, signature_locations, use_current_date, custom_date, service_method=None, signature_style="elegant"):
     """Create signed PDF using PyMuPDF for better stream handling"""
     import traceback
 
@@ -812,22 +867,9 @@ def create_signed_pdf_simple(pdf_path_or_bytes, signature_name, signature_locati
         pdf_buffer.seek(0)
         doc = fitz.open(stream=pdf_buffer, filetype="pdf")
         
-        # 📌 3.5. EMBED CUSTOM FONT IF AVAILABLE
-        custom_font_available = False
-        font_buffer = None
-        font_path = "fonts/Playwrite_AU_QLD/PlaywriteAUQLD-VariableFont_wght.ttf"
-        if os.path.exists(font_path):
-            try:
-                # Try to embed the custom font at document level
-                font_buffer = open(font_path, "rb").read()
-                custom_font_available = True
-                print(f"✅ Custom font loaded: {font_path}")
-            except Exception as e:
-                custom_font_available = False
-                font_buffer = None
-                print(f"❌ Failed to load custom font: {e}")
-        else:
-            print(f"❌ Font file not found: {font_path}")
+        # 📌 3.5. SETUP TIMES NEW ROMAN FONT
+        # Check what built-in fonts are available
+        print("Available built-in fonts in PyMuPDF:")
 
         # 📌 4. PROCESS EACH PAGE
         processed_pages = []
@@ -835,6 +877,32 @@ def create_signed_pdf_simple(pdf_path_or_bytes, signature_name, signature_locati
         for page_num in range(len(doc)):
             page = doc[page_num]
             page_signatures = [loc for loc in signature_locations if loc['page'] == page_num]
+            
+            print(f"🔍 Page {page_num + 1}: Found {len(page_signatures)} signature locations")
+            for sig in page_signatures:
+                print(f"  - {sig['text']} at ({sig['x']}, {sig['y']}) type: {sig['placeholder_type']}")
+            
+            # Debug: show what types we have
+            types_found = [sig['placeholder_type'] for sig in page_signatures]
+            print(f"📋 Types on page {page_num + 1}: {set(types_found)}")
+
+            # Copy signatures (but not date fields) from page 1 if none found on this page
+            if not page_signatures and page_num > 0:
+                page_0_signatures = [loc for loc in signature_locations if loc['page'] == 0]
+                if page_0_signatures:
+                    print(f"📋 No signatures found on page {page_num + 1}, copying signatures from page 1...")
+                    # Copy ONLY signature and checkbox locations, NOT date fields
+                    page_signatures = []
+                    for sig in page_0_signatures:
+                        # Only copy actual signatures and checkboxes, skip date fields
+                        if sig.get('placeholder_type') in ['signature', 'checkbox', 'parentheses_personally_delivering', 'parentheses_posting']:
+                            copied_sig = sig.copy()
+                            copied_sig['page'] = page_num
+                            page_signatures.append(copied_sig)
+                    if page_signatures:
+                        print(f"✅ Copied {len(page_signatures)} signatures/checkboxes to page {page_num + 1}")
+                    else:
+                        print(f"📋 No signatures to copy to page {page_num + 1}")
 
             if page_signatures:
                 # Add signatures directly using PyMuPDF text insertion
@@ -869,8 +937,9 @@ def create_signed_pdf_simple(pdf_path_or_bytes, signature_name, signature_locati
                             render_mode=0
                         )
                     elif placeholder_type == 'day_blank':
-                        # Handle Florida template day blanks (______day pattern)
-                        text_to_insert = day_text
+                        # Handle day blanks - use day with suffix like "6th"
+                        text_to_insert = day_text  # Use day_text which includes "th" suffix
+                        print(f"🗓️ Inserting day: {text_to_insert}")
                         
                         # Insert date text with better positioning and alignment
                         point = calculate_text_position(x, y, text_to_insert, font_size, placeholder_type)
@@ -885,8 +954,9 @@ def create_signed_pdf_simple(pdf_path_or_bytes, signature_name, signature_locati
                             render_mode=0
                         )
                     elif placeholder_type == 'month_blank':
-                        # Handle Florida template month blanks (of___________, pattern)
-                        text_to_insert = month_text
+                        # Handle Florida template month blanks - use full month name
+                        text_to_insert = month_text  # Full month like "August"
+                        print(f"🗓️ Inserting month: {text_to_insert}")
                         
                         # Insert date text with better positioning and alignment
                         point = calculate_text_position(x, y, text_to_insert, font_size, placeholder_type)
@@ -901,8 +971,9 @@ def create_signed_pdf_simple(pdf_path_or_bytes, signature_name, signature_locati
                             render_mode=0
                         )
                     elif placeholder_type == 'year_blank':
-                        # Handle Florida template year blanks (20______. pattern)
-                        text_to_insert = year_text
+                        # Handle Florida template year blanks (20______. pattern) - use last 2 digits only
+                        text_to_insert = year_text  # This is already the last 2 digits (like "25")
+                        print(f"🗓️ Inserting year: {text_to_insert}")
                         
                         # Insert date text with better positioning and alignment
                         point = calculate_text_position(x, y, text_to_insert, font_size, placeholder_type)
@@ -1035,8 +1106,9 @@ def create_signed_pdf_simple(pdf_path_or_bytes, signature_name, signature_locati
                         else:
                             print(f"⏭️ Skipped parentheses: {checkbox_type} (doesn't match selected service method)")
                     else:
-                        # Use text-based signature with cursive styling
-                        text_to_insert = create_handwritten_signature(signature_name)
+                        # Use text-based signature with selected styling
+                        text_to_insert = create_handwritten_signature(signature_name, signature_style)
+                        print(f"🖋️ PROCESSING SIGNATURE: {text_to_insert} at position ({x}, {y})")
                         
                         # Position signature based on location - top signature above line, bottom signature on line
                         # Based on debug output: "SIGN HERE" is at y: 311.58, underscore line is at y: 315.66
@@ -1046,70 +1118,36 @@ def create_signed_pdf_simple(pdf_path_or_bytes, signature_name, signature_locati
                         else:  # Bottom signature - position right on the line
                             point = fitz.Point(x, y)  # Position signature right on the line
                         
-                        # Use elegant styling for signature with cursive font
-                        font_size_adjusted = font_size + 2  # Slightly larger for elegance
+                        # Use signature-style formatting with appropriate font size
+                        font_size_adjusted = max(font_size + 2, 14)  # Moderate increase, minimum 14pt
                         
-                        # Use custom Playwrite font for italic/cursive signature
-                        if custom_font_available and font_buffer is not None:
+                        # Signature color - slightly blue-black like real ink
+                        signature_color = (0.1, 0.1, 0.2)  # Dark blue-black
+                        
+                        # Use Times New Roman font ONLY - try different approaches
+                        success = False
+                        
+                        # Method 1: Try with fontname parameter
+                        for font_name in ["times-roman", "times", "serif"]:
                             try:
-                                # Use the embedded custom font
                                 page.insert_text(
                                     point,
                                     text_to_insert,
                                     fontsize=font_size_adjusted,
-                                    color=(0, 0, 0),
-                                    fontname="playwrite",
-                                    fontfile=font_buffer,
+                                    color=signature_color,
+                                    fontname=font_name,
                                     render_mode=0
                                 )
-                                print(f"✅ Used custom font for signature: {text_to_insert}")
+                                print(f"✅ Used Times New Roman signature ({font_name}): {text_to_insert}")
+                                success = True
+                                break
                             except Exception as e:
-                                print(f"❌ Custom font failed: {e}")
-                                # If custom font fails, try Times Italic
-                                try:
-                                    page.insert_text(
-                                        point,
-                                        text_to_insert,
-                                        fontsize=font_size_adjusted,
-                                        color=(0, 0, 0),
-                                        fontname="tiro",
-                                        render_mode=0
-                                    )
-                                    print(f"✅ Used Times Italic fallback for signature: {text_to_insert}")
-                                except:
-                                    # Final fallback to helvetica italic
-                                    page.insert_text(
-                                        point,
-                                        text_to_insert,
-                                        fontsize=font_size_adjusted,
-                                        color=(0, 0, 0),
-                                        fontname="helv",
-                                        render_mode=0
-                                    )
-                                    print(f"✅ Used Helvetica fallback for signature: {text_to_insert}")
-                        else:
-                            # Try Times Italic if custom font not available
-                            try:
-                                page.insert_text(
-                                    point,
-                                    text_to_insert,
-                                    fontsize=font_size_adjusted,
-                                    color=(0, 0, 0),
-                                    fontname="tiro",
-                                    render_mode=0
-                                )
-                                print(f"✅ Used Times Italic (no custom font): {text_to_insert}")
-                            except:
-                                # Final fallback to helvetica italic
-                                page.insert_text(
-                                    point,
-                                    text_to_insert,
-                                    fontsize=font_size_adjusted,
-                                    color=(0, 0, 0),
-                                    fontname="helv",
-                                    render_mode=0
-                                )
-                                print(f"✅ Used Helvetica (no custom font): {text_to_insert}")
+                                print(f"❌ Failed with fontname '{font_name}': {e}")
+                                continue
+                        
+                        if not success:
+                            print(f"❌ ERROR: No Times New Roman font variants worked!")
+                            raise Exception("Times New Roman font is required but not available")
 
         # 📌 5. EXPORT FINAL PDF - SPLIT INTO INDIVIDUAL PAGES
         try:
@@ -1176,14 +1214,14 @@ def main():
             key="signature_name"
         )
         
-        # Text signature info and preview
-        st.info("Using text-based signature")
+        # Text signature settings
         signature_image = None
+        signature_style = "elegant"  # Default to elegant style
         
         # Show signature preview
         if signature_name:
             st.subheader("Signature Preview")
-            preview_signature = create_handwritten_signature(signature_name)
+            preview_signature = create_handwritten_signature(signature_name, signature_style)
             st.markdown(f"**Preview:** `{preview_signature}`")
         
         # Date options
@@ -1281,15 +1319,15 @@ def main():
                             if matched_template and match_score > 20:  # Minimum confidence threshold
                                 st.success(f"Matched to {matched_template} (confidence: {match_score})")
                                 
-                                # Extract property name and unit number for file naming from the UPLOADED PDF
-                                property_name, unit_number = extract_property_and_unit_info(pdf_bytes, matched_template)
+                                # Extract unit number for file naming from the UPLOADED PDF
+                                unit_number = extract_unit_info(pdf_bytes, matched_template)
                                 
                                 # Get template info and find placeholders
                                 template_info = TEMPLATES[matched_template]
                                 template_path = template_info['file_path']
                                 
-                                # Find signature placeholders in the template with template-specific positioning
-                                signature_locations = find_signature_placeholders_simple(template_path, matched_template)
+                                # Find signature placeholders in the UPLOADED PDF (not template) with template-specific positioning
+                                signature_locations = find_signature_placeholders_simple(pdf_bytes, matched_template)
                                 
                                 if signature_locations:
                                     
@@ -1300,11 +1338,12 @@ def main():
                                         signature_locations,
                                         use_current_date,
                                         custom_date,
-                                        service_method
+                                        service_method,
+                                        signature_style
                                     )
                                     
                                     if processed_pages:
-                                        # Create formatted file name: "{Property Name}{Unit Number} Demand Letter {Current Date}"
+                                        # Create formatted file name: "Unit{Unit Number} Demand Letter {Current Date}"
                                         current_date = datetime.now().strftime('%m-%d-%Y')
                                         
                                         # Add each individual page as a separate file
@@ -1312,13 +1351,12 @@ def main():
                                             # Extract unit number for each individual page if it's a multi-page PDF
                                             if len(processed_pages) > 1:
                                                 # For multi-page PDFs, extract unit number from each page separately
-                                                page_property_name, page_unit_number = extract_property_and_unit_info_from_page(pdf_bytes, matched_template, page_info['page_num'] - 1)
+                                                page_unit_number = extract_unit_info_from_page(pdf_bytes, matched_template, page_info['page_num'] - 1)
                                             else:
                                                 # For single page PDFs, use the already extracted info
-                                                page_property_name = property_name
                                                 page_unit_number = unit_number
                                             
-                                            formatted_filename = f"{page_property_name}{page_unit_number} Demand Letter {current_date}.pdf"
+                                            formatted_filename = f"Unit{page_unit_number} Demand Letter {current_date}.pdf"
                                             processed_files.append({
                                                 'name': formatted_filename,
                                                 'data': page_info['data'],
@@ -1326,7 +1364,6 @@ def main():
                                                 'matched_template': matched_template,
                                                 'match_score': match_score,
                                                 'page_num': page_info['page_num'],
-                                                'property_name': page_property_name,
                                                 'unit_number': page_unit_number
                                             })
                                 else:
@@ -1343,14 +1380,14 @@ def main():
                             with zipfile.ZipFile(tmp_zip.name, 'w') as zip_file:
                                 for file_info in processed_files:
                                     zip_file.writestr(file_info['name'], file_info['data'])
-                            
+                                
                             # Read the zip file
                             with open(tmp_zip.name, 'rb') as f:
                                 zip_bytes = f.read()
                             
                             # Clean up
                             os.unlink(tmp_zip.name)
-                        
+                            
                         # Prominent ZIP download button
                         current_date_zip = datetime.now().strftime('%m-%d-%Y')
                         st.subheader("Download Options")

@@ -555,6 +555,86 @@ def _extract_placeholders(pdf, template_name=None):
 
 
 
+def extract_property_and_unit_info(pdf_path_or_bytes, template_name):
+    """Extract property name and unit number from PDF for file naming"""
+    try:
+        # Handle both file paths and bytes
+        if isinstance(pdf_path_or_bytes, io.BytesIO):
+            pdf_path_or_bytes.seek(0)
+            pdf_bytes = pdf_path_or_bytes.getvalue()
+        elif isinstance(pdf_path_or_bytes, bytes):
+            pdf_bytes = pdf_path_or_bytes
+        elif isinstance(pdf_path_or_bytes, str) and os.path.exists(pdf_path_or_bytes):
+            with open(pdf_path_or_bytes, 'rb') as f:
+                pdf_bytes = f.read()
+        else:
+            return "Unknown Property", "0000"
+        
+        # Create a fresh BytesIO and analyze
+        file_buffer = io.BytesIO(pdf_bytes)
+        file_buffer.seek(0)
+        
+        with pdfplumber.open(file_buffer) as pdf:
+            page = pdf.pages[0]
+            words = page.extract_words()
+            
+            property_name = "Unknown Property"
+            unit_number = "0000"
+            
+            if template_name == "Florida Template":
+                # Look for "The Hangar" pattern and address like "8890 Ransley Station Blvd 0117"
+                # Unit number is the last 4-digit number in the address line
+                property_name = "The Hangar"  # Default for Florida
+                for i, word_data in enumerate(words):
+                    word_text = word_data['text'].strip()
+                    if word_text.lower() == 'hangar':
+                        property_name = "The Hangar"
+                    # Look for 4-digit numbers that could be unit numbers (like 0117)
+                    elif (len(word_text) == 4 and word_text.isdigit()):
+                        unit_number = word_text
+                        
+            elif template_name == "Georgia Template":
+                # Look for "Apartment Number: XXXX" pattern
+                property_name = "Wesleyan Management"  # Default based on template
+                for i, word_data in enumerate(words):
+                    word_text = word_data['text'].strip()
+                    if word_text.lower() == 'apartment' and i + 2 < len(words):
+                        if words[i + 1]['text'].strip().lower() == 'number:':
+                            unit_number = words[i + 2]['text'].strip()
+                            break
+                            
+            elif template_name == "Alabama Template":
+                # Look for "Haven The" and extract unit from address patterns:
+                # Pattern 1: "2221 (XXXX) Chace Lake Drive" - first number
+                # Pattern 2: "801 Montclair Road Apt # 1201" - number after "Apt #"
+                property_name = "Haven The"  # Default for Alabama
+                for i, word_data in enumerate(words):
+                    word_text = word_data['text'].strip()
+                    if word_text.lower() == 'haven' and i + 1 < len(words):
+                        if words[i + 1]['text'].strip().lower() == 'the':
+                            property_name = "Haven The"
+                    
+                    # Pattern 2: Look for "Apt #" followed by unit number
+                    elif word_text.lower() == 'apt' and i + 2 < len(words):
+                        if words[i + 1]['text'].strip() == '#':
+                            potential_unit = words[i + 2]['text'].strip()
+                            if potential_unit.isdigit():
+                                unit_number = potential_unit
+                                break
+                    
+                    # Pattern 1: Look for first 4-digit number in tenant address area (like 2221)
+                    elif (len(word_text) == 4 and word_text.isdigit() and 
+                          120 <= word_data['top'] <= 140 and unit_number == "0000"):
+                        # Only use if we haven't found an "Apt #" pattern yet
+                        unit_number = word_text
+            
+            print(f"🏢 Extracted: Property='{property_name}', Unit='{unit_number}'")
+            return property_name, unit_number
+            
+    except Exception as e:
+        print(f"⚠️ Error extracting property/unit info: {e}")
+        return "Unknown Property", "0000"
+
 def create_handwritten_signature(name):
     """Create a beautiful cursive signature"""
     parts = name.split()
@@ -1076,13 +1156,16 @@ def main():
     st.title("Demand Letter Generator")
     st.markdown("Upload PDFs with signatures and dates")
     
+
+    
     # Sidebar for configuration
     with st.sidebar:
         st.header("Configuration")
         
         signature_name = st.text_input(
             "Signer Name",
-            placeholder="Enter the name to use as signature"
+            placeholder="Enter the name to use as signature",
+            key="signature_name"
         )
         
         # Text signature info and preview
@@ -1102,7 +1185,8 @@ def main():
         date_option = st.radio(
             "Choose Date Option",
             ["Use Current Date", "Select Custom Date"],
-            help="Choose whether to use today's date or select a specific date"
+            help="Choose whether to use today's date or select a specific date",
+            key="date_option"
         )
         
         if date_option == "Use Current Date":
@@ -1114,20 +1198,25 @@ def main():
             custom_date = st.date_input(
                 "Select Date for Documents",
                 value=datetime.now().date(),
-                help="Choose the date to appear on all generated documents"
+                help="Choose the date to appear on all generated documents",
+                key="custom_date"
             )
+                
             st.info(f"Selected date: {custom_date.strftime('%B %d, %Y')}")
         
         # Checkbox options
         st.subheader("Service Method")
         
+        service_method_options = [
+            "By personally delivering same upon said tenant",
+            "By posting same at the above described premises in the absence of said tenant",
+        ]
+        
         service_method = st.radio(
             "Choose Service Method",
-            [
-                "By personally delivering same upon said tenant",
-                "By posting same at the above described premises in the absence of said tenant",
-            ],
-            help="Select which service method checkbox should be checked on the documents"
+            service_method_options,
+            help="Select which service method checkbox should be checked on the documents",
+            key="service_method"
         )
         
         st.info(f"Will check: **{service_method}**")
@@ -1184,6 +1273,9 @@ def main():
                             if matched_template and match_score > 20:  # Minimum confidence threshold
                                 st.success(f"Matched to {matched_template} (confidence: {match_score})")
                                 
+                                # Extract property name and unit number for file naming
+                                property_name, unit_number = extract_property_and_unit_info(pdf_bytes, matched_template)
+                                
                                 # Get template info and find placeholders
                                 template_info = TEMPLATES[matched_template]
                                 template_path = template_info['file_path']
@@ -1229,15 +1321,21 @@ def main():
                                     )
                                     
                                     if processed_pages:
+                                        # Create formatted file name: "{Property Name}{Unit Number} Demand Letter {Current Date}"
+                                        current_date = datetime.now().strftime('%m-%d-%Y')
+                                        
                                         # Add each individual page as a separate file
                                         for page_info in processed_pages:
+                                            formatted_filename = f"{property_name}{unit_number} Demand Letter {current_date}.pdf"
                                             processed_files.append({
-                                                'name': f"{uploaded_file.name.replace('.pdf', '')}_page_{page_info['page_num']}.pdf",
+                                                'name': formatted_filename,
                                                 'data': page_info['data'],
                                                 'locations_found': len(signature_locations),
                                                 'matched_template': matched_template,
                                                 'match_score': match_score,
-                                                'page_num': page_info['page_num']
+                                                'page_num': page_info['page_num'],
+                                                'property_name': property_name,
+                                                'unit_number': unit_number
                                             })
                                 else:
                                     st.warning(f"No signature placeholders found in {matched_template}")
@@ -1261,7 +1359,7 @@ def main():
                             with tempfile.NamedTemporaryFile(delete=False, suffix='.zip') as tmp_zip:
                                 with zipfile.ZipFile(tmp_zip.name, 'w') as zip_file:
                                     for file_info in processed_files:
-                                        zip_file.writestr(f"signed_{file_info['name']}", file_info['data'])
+                                        zip_file.writestr(file_info['name'], file_info['data'])
                                 
                                 # Read the zip file
                                 with open(tmp_zip.name, 'rb') as f:
@@ -1271,10 +1369,11 @@ def main():
                                 os.unlink(tmp_zip.name)
                             
                             # Download button for zip file
+                            current_date_zip = datetime.now().strftime('%m-%d-%Y')
                             st.download_button(
-                                label="Download All Signed PDFs (ZIP)",
+                                label="Download All Signed Demand Letters (ZIP)",
                                 data=zip_bytes,
-                                file_name=f"signed_pdfs_{datetime.now().strftime('%Y%m%d_%H%M%S')}.zip",
+                                file_name=f"Demand Letters {current_date_zip}.zip",
                                 mime="application/zip"
                             )
                         

@@ -8,6 +8,9 @@ import tempfile
 import os
 import re
 import base64
+from PIL import Image
+from streamlit_drawable_canvas import st_canvas
+import numpy as np
 
 # Template definitions with exact file paths
 TEMPLATES = {
@@ -715,8 +718,86 @@ def extract_unit_info_from_page(pdf_path_or_bytes, template_name, page_number=0)
         print(f"⚠️ Error extracting unit info from page {page_number + 1}: {e}")
         return "0000"
 
-def create_handwritten_signature(name, style="elegant"):
+def process_drawn_signature(canvas_result):
+    """Process drawn signature from canvas and return it in a format suitable for PDF insertion"""
+    if canvas_result.image_data is None:
+        return None
+        
+    # Convert the RGBA numpy array to PIL Image
+    img_data = canvas_result.image_data
+    
+    # Create PIL Image from numpy array
+    img = Image.fromarray(img_data.astype('uint8'), 'RGBA')
+    
+    # Create a mask for non-transparent pixels
+    mask = img.split()[3]  # Get alpha channel
+    
+    # Create a new RGBA image with transparent background
+    new_img = Image.new('RGBA', img.size, (255, 255, 255, 0))
+    
+    # Only copy non-transparent pixels
+    for x in range(img.width):
+        for y in range(img.height):
+            if mask.getpixel((x, y)) > 0:  # If pixel is not fully transparent
+                new_img.putpixel((x, y), img.getpixel((x, y)))
+    
+    # Crop the image to remove empty space
+    bbox = new_img.getbbox()
+    if bbox:
+        new_img = new_img.crop(bbox)
+    
+    # Create a BytesIO object to store the processed image
+    img_byte_arr = io.BytesIO()
+    new_img.save(img_byte_arr, format='PNG')
+    img_byte_arr.seek(0)
+    
+    return img_byte_arr.getvalue()
+
+def process_signature_image(uploaded_file):
+    """Process uploaded signature image and return it in a format suitable for PDF insertion"""
+    try:
+        # Read the image
+        image_bytes = uploaded_file.read()
+        
+        # Convert to PIL Image
+        img = Image.open(io.BytesIO(image_bytes))
+        
+        # Convert to RGBA if not already
+        if img.mode != 'RGBA':
+            img = img.convert('RGBA')
+        
+        # Create a new transparent image
+        new_img = Image.new('RGBA', img.size, (255, 255, 255, 0))
+        
+        # Create a mask for non-transparent pixels
+        mask = img.split()[3]  # Get alpha channel
+        
+        # Only copy non-transparent pixels
+        for x in range(img.width):
+            for y in range(img.height):
+                if mask.getpixel((x, y)) > 0:  # If pixel is not fully transparent
+                    new_img.putpixel((x, y), img.getpixel((x, y)))
+        
+        # Crop the image to remove empty space
+        bbox = new_img.getbbox()
+        if bbox:
+            new_img = new_img.crop(bbox)
+        
+        # Create a BytesIO object to store the processed image
+        img_byte_arr = io.BytesIO()
+        new_img.save(img_byte_arr, format='PNG')
+        img_byte_arr.seek(0)
+        
+        return img_byte_arr.getvalue()
+    except Exception as e:
+        st.error(f"Error processing signature image: {str(e)}")
+        return None
+
+def create_handwritten_signature(name, style="elegant", signature_image=None):
     """Create a realistic handwritten signature with multiple style options"""
+    if signature_image:
+        return signature_image
+        
     parts = name.split()
     
     if style == "elegant":
@@ -1246,48 +1327,104 @@ def create_signed_pdf_simple(pdf_path_or_bytes, signature_name, signature_locati
                         else:
                             print(f"⏭️ Skipped parentheses: {checkbox_type} (doesn't match selected service method)")
                     else:
-                        # Use text-based signature with selected styling
-                        text_to_insert = create_handwritten_signature(signature_name, signature_style)
-                        print(f"🖋️ PROCESSING SIGNATURE: {text_to_insert} at position ({x}, {y})")
-                        
-                        # Position signature based on location - top signature above line, bottom signature on line
-                        # Based on debug output: "SIGN HERE" is at y: 311.58, underscore line is at y: 315.66
-                        # Top signature (y < 350) should be above the line, bottom signature (y > 500) should be on the line
-                        if y < 350:  # Top signature - position above the line
-                            point = fitz.Point(x, y - 13)  # Move up 15 points above the line
-                        else:  # Bottom signature - position right on the line
-                            point = fitz.Point(x, y)  # Position signature right on the line
-                        
-                        # Use signature-style formatting with appropriate font size
-                        font_size_adjusted = max(font_size + 2, 14)  # Moderate increase, minimum 14pt
-                        
-                        # Signature color - slightly blue-black like real ink
-                        signature_color = (0.1, 0.1, 0.2)  # Dark blue-black
-                        
-                        # Use Times New Roman font ONLY - try different approaches
-                        success = False
-                        
-                        # Method 1: Try with fontname parameter
-                        for font_name in ["times-roman", "times", "serif"]:
+                        # Handle signature insertion
+                        if isinstance(signature_name, bytes):
+                            # This is an image signature
+                            print(f"🖋️ PROCESSING IMAGE SIGNATURE at position ({x}, {y})")
+                            
+                            # Create a temporary file for the image
+                            with tempfile.NamedTemporaryFile(delete=False, suffix='.png') as temp_img:
+                                temp_img.write(signature_name)
+                                temp_img_path = temp_img.name
+                            
                             try:
-                                page.insert_text(
-                                    point,
-                                    text_to_insert,
-                                    fontsize=font_size_adjusted,
-                                    color=signature_color,
-                                    fontname=font_name,
-                                    render_mode=0
+                                # Load and process the image with PIL first
+                                pil_img = Image.open(temp_img_path)
+                                
+                                # Convert to RGBA
+                                if pil_img.mode != 'RGBA':
+                                    pil_img = pil_img.convert('RGBA')
+                                
+                                # Create a new image with transparent background
+                                new_img = Image.new('RGBA', pil_img.size, (255, 255, 255, 0))
+                                
+                                # Create a mask for non-transparent pixels
+                                data = pil_img.getdata()
+                                new_data = []
+                                
+                                # Process each pixel
+                                for item in data:
+                                    # If pixel is white or very light, make it transparent
+                                    if item[0] > 240 and item[1] > 240 and item[2] > 240:
+                                        new_data.append((255, 255, 255, 0))
+                                    else:
+                                        # Keep the pixel with its original color but fully opaque
+                                        new_data.append((item[0], item[1], item[2], 255))
+                                
+                                new_img.putdata(new_data)
+                                
+                                # Save the processed image
+                                temp_processed = tempfile.NamedTemporaryFile(delete=False, suffix='.png')
+                                new_img.save(temp_processed.name, 'PNG')
+                                
+                                # Now load with PyMuPDF
+                                img = fitz.Pixmap(temp_processed.name)
+                                
+                                # Calculate scaling to fit the signature space
+                                target_width = min(150, sig_loc['width'] if 'width' in sig_loc else 150)
+                                scale = target_width / img.width
+                                
+                                # Calculate position
+                                if y < 350:  # Top signature - position above the line
+                                    point = fitz.Point(x, y - img.height * scale)
+                                else:  # Bottom signature - position on the line
+                                    point = fitz.Point(x, y - (img.height * scale * 0.8))  # 80% from bottom
+                                
+                                # Insert the image
+                                page.insert_image(
+                                    rect=fitz.Rect(
+                                        point.x, point.y,
+                                        point.x + img.width * scale,
+                                        point.y + img.height * scale
+                                    ),
+                                    pixmap=img
                                 )
-                                print(f"✅ Used Times New Roman signature ({font_name}): {text_to_insert}")
-                                success = True
-                                break
-                            except Exception as e:
-                                print(f"❌ Failed with fontname '{font_name}': {e}")
-                                continue
-                        
-                        if not success:
-                            print(f"❌ ERROR: No Times New Roman font variants worked!")
-                            raise Exception("Times New Roman font is required but not available")
+                                
+                                # Clean up the processed image
+                                os.unlink(temp_processed.name)
+                                print(f"✅ Inserted image signature")
+                                
+                            finally:
+                                # Clean up temporary file
+                                if os.path.exists(temp_img_path):
+                                    os.unlink(temp_img_path)
+                        else:
+                            # Use text-based signature with selected styling
+                            text_to_insert = create_handwritten_signature(signature_name, signature_style)
+                            print(f"🖋️ PROCESSING TEXT SIGNATURE: {text_to_insert} at position ({x}, {y})")
+                            
+                            # Position signature based on location
+                            if y < 350:  # Top signature - position above the line
+                                point = fitz.Point(x, y - 13)  # Move up 15 points above the line
+                            else:  # Bottom signature - position right on the line
+                                point = fitz.Point(x, y)  # Position signature right on the line
+                            
+                            # Use signature-style formatting with appropriate font size
+                            font_size_adjusted = max(font_size + 2, 14)  # Moderate increase, minimum 14pt
+                            
+                            # Signature color - slightly blue-black like real ink
+                            signature_color = (0.1, 0.1, 0.2)  # Dark blue-black
+                            
+                            # Insert text signature
+                            page.insert_text(
+                                point,
+                                text_to_insert,
+                                fontsize=font_size_adjusted,
+                                color=signature_color,
+                                fontname="times-roman",
+                                render_mode=0
+                            )
+                            print(f"✅ Inserted text signature: {text_to_insert}")
 
         # 📌 5. EXPORT FINAL PDF - SPLIT INTO INDIVIDUAL PAGES
         try:
@@ -1348,21 +1485,70 @@ def main():
     with st.sidebar:
         st.header("Configuration")
         
-        signature_name = st.text_input(
-            "Signer Name",
-            placeholder="Enter the name to use as signature",
-            key="signature_name"
+        st.subheader("Signature Settings")
+        signature_type = st.radio(
+            "Choose Signature Type",
+            ["Text", "Upload Image", "Draw Signature"],
+            help="Choose how to create your signature"
         )
         
-        # Text signature settings
         signature_image = None
+        signature_name = None
         signature_style = "elegant"  # Default to elegant style
         
-        # Show signature preview
-        if signature_name:
-            st.subheader("Signature Preview")
-            preview_signature = create_handwritten_signature(signature_name, signature_style)
-            st.markdown(f"**Preview:** `{preview_signature}`")
+        if signature_type == "Text":
+            signature_name = st.text_input(
+                "Signer Name",
+                placeholder="Enter the name to use as signature",
+                key="signature_name"
+            )
+            
+            # Show text signature preview
+            if signature_name:
+                st.subheader("Signature Preview")
+                preview_signature = create_handwritten_signature(signature_name, signature_style)
+                st.markdown(f"**Preview:** `{preview_signature}`")
+                
+        elif signature_type == "Upload Image":
+            uploaded_signature = st.file_uploader(
+                "Upload Signature Image",
+                type=["png", "jpg", "jpeg"],
+                help="Upload a transparent PNG or JPG image of your signature"
+            )
+            
+            if uploaded_signature:
+                # Process and preview the signature image
+                signature_image = process_signature_image(uploaded_signature)
+                if signature_image:
+                    st.subheader("Signature Preview")
+                    st.image(signature_image, caption="Your uploaded signature")
+                    
+        else:  # Draw Signature
+            st.write("Draw your signature below:")
+            
+            # Create a canvas component
+            canvas_result = st_canvas(
+                fill_color="rgba(255, 255, 255, 0)",  # Transparent fill
+                stroke_width=1.5,  # Thicker stroke for bolder signature
+                stroke_color="#000000",  # Black color for signature
+                background_color="rgba(255, 255, 255, 0)",  # Transparent background
+                width=300,  # Smaller width
+                height=100,  # Smaller height
+                drawing_mode="freedraw",
+                key="signature_canvas",
+            )
+            
+            # Add a clear button
+            if st.button("Clear Signature"):
+                # This will trigger a rerun with a fresh canvas
+                st.session_state.pop('signature_canvas', None)
+            
+            # Process the drawn signature when available
+            if canvas_result.image_data is not None:
+                signature_image = process_drawn_signature(canvas_result)
+                if signature_image:
+                    st.subheader("Signature Preview")
+                    st.image(signature_image, caption="Your drawn signature")
         
         # Date options
         st.subheader("Date Settings")
@@ -1431,8 +1617,12 @@ def main():
                 
                 # Process files
                 if st.button("Add Signatures to PDFs", type="primary"):
-                    if not signature_name:
+                    # Validate based on signature type
+                    if signature_type == "Text" and not signature_name:
                         st.error("Please enter a signer name")
+                        return
+                    elif signature_type in ["Upload Image", "Draw Signature"] and not signature_image:
+                        st.error("Please provide a signature")
                         return
                     
                     processed_files = []
@@ -1472,9 +1662,15 @@ def main():
                                 if signature_locations:
                                     
                                     # Add signatures at the found locations using the uploaded PDF
+                                    # Determine what to pass as signature
+                                    if signature_type in ["Upload Image", "Draw Signature"]:
+                                        signature_to_use = signature_image
+                                    else:
+                                        signature_to_use = signature_name
+                                        
                                     processed_pages = create_signed_pdf_simple(
                                         pdf_bytes,  # Pass BytesIO object directly
-                                        signature_name,
+                                        signature_to_use,
                                         signature_locations,
                                         use_current_date,
                                         custom_date,

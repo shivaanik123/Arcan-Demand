@@ -1,6 +1,10 @@
 [build]
 builder = "NIXPACKS"
-buildCommand = "pip install -r requirements.txt"
+buildCommand = """
+apt-get update && apt-get install -y python3-pip
+python3 -m pip install --upgrade pip
+pip install -r requirements.txt
+"""
 
 [deploy]
 startCommand = "streamlit run streamlit_app.py --server.address 0.0.0.0 --server.port $PORT"
